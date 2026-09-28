@@ -1,1 +1,2 @@
 cognite-sdk>=7.62,<9
+numpy

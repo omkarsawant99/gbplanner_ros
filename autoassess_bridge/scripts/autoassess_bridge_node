@@ -4,8 +4,11 @@
 
 Publishes /autoassess/plan (std_msgs/String, plan.json text as written by `dss plan download`),
 /autoassess/inspection_targets (geometry_msgs/PoseArray, one inspection pose per task) and
-/autoassess/plan_id (std_msgs/String). Optionally sends the area box to gbplanner's
-set_global_bound service. Credentials come from COGNITE_* env variables.
+/autoassess/plan_id (std_msgs/String). With ~publish_map (default true) it also publishes the
+plan's reference map (a point cloud of the plan's map campaign, cached locally) latched on
+~map_topic (default /ballast_tank/pointcloud), like `pcl_ros pcd_to_pointcloud` did.
+Optionally sends the area box to gbplanner's set_global_bound service.
+Credentials come from COGNITE_* env variables.
 
 With ~upload_enabled (default false) it also uploads a finished mission to CDF (the only
 writes this node makes): the gbplanner mesh plus the ~mission_dir files as CogniteFiles, and an
@@ -23,6 +26,7 @@ import time
 import rospy
 from geometry_msgs.msg import Point, Pose, PoseArray, Quaternion
 from nav_msgs.msg import Odometry, Path
+from sensor_msgs.msg import PointCloud2, PointField
 from planner_msgs.msg import PlanningBound
 from planner_msgs.srv import planner_set_global_bound, planner_set_global_boundRequest
 from std_msgs.msg import Bool, String
@@ -30,6 +34,7 @@ from std_srvs.srv import Empty, Trigger, TriggerResponse
 
 from autoassess_bridge import cdf
 from autoassess_bridge.bound import GlobalBoundSetter, ServiceUnavailable
+from autoassess_bridge.map import DEFAULT_CACHE_DIR, MapSource, MapUpdater
 from autoassess_bridge.mission_end import MissionEndDetector
 from autoassess_bridge.plan import area_bounds, plan_to_poses
 from autoassess_bridge.poller import PlanPoller
@@ -171,6 +176,29 @@ class MissionUploads:
         self._detector.on_speed((v.x * v.x + v.y * v.y + v.z * v.z) ** 0.5, time.time())
 
 
+def make_map_publisher(topic, frame_id):
+    pub = rospy.Publisher(topic, PointCloud2, queue_size=1, latch=True)
+
+    def publish(_map_id, _map_file, cloud):
+        msg = PointCloud2()
+        msg.header.frame_id = frame_id
+        msg.header.stamp = rospy.Time.now()
+        msg.height = cloud.height
+        msg.width = cloud.width
+        msg.fields = [
+            PointField(name=f.name, offset=f.offset, datatype=f.datatype, count=f.count)
+            for f in cloud.fields
+        ]
+        msg.is_bigendian = False
+        msg.point_step = cloud.point_step
+        msg.row_step = cloud.point_step * cloud.width
+        msg.data = cloud.data
+        msg.is_dense = cloud.is_dense
+        pub.publish(msg)
+
+    return publish
+
+
 def to_pose_array(poses, frame_id):
     msg = PoseArray()
     msg.header.frame_id = frame_id
@@ -208,6 +236,18 @@ def main():
     plan_id_pub = rospy.Publisher("/autoassess/plan_id", String, queue_size=1, latch=True)
     rospy.loginfo("Polling AutoAssess plans for area %s every %.1f s", area, period_s)
 
+    maps = None
+    if bool(rospy.get_param("~publish_map", True)):
+        map_topic = rospy.get_param("~map_topic", "/ballast_tank/pointcloud")
+        maps = MapUpdater(
+            MapSource(client, rospy.get_param("~map_cache_dir", DEFAULT_CACHE_DIR), log, space=space),
+            rospy.get_param("~map_file_label", "") or None,
+            make_map_publisher(map_topic, rospy.get_param("~map_frame_id", "") or frame_id),
+            log,
+            retry_s=max(period_s, 30.0),
+        )
+        rospy.loginfo("Publishing the plan's reference map on %s", map_topic)
+
     current = {"plan_id": None}
     uploads = None
     if bool(rospy.get_param("~upload_enabled", False)):
@@ -218,6 +258,8 @@ def main():
     while not rospy.is_shutdown():
         if uploads is not None:
             uploads.tick()
+        if maps is not None:
+            maps.tick(time.time())
         if time.time() < next_poll:
             try:
                 rate.sleep()
@@ -238,6 +280,8 @@ def main():
             )
             if skipped:
                 rospy.logwarn("Tasks without a target (no pose published): %s", ", ".join(skipped))
+            if maps is not None:
+                maps.want(update.plan.get("mapExternalId"))  # loads in the background
             if bound is not None:
                 box = area_bounds(update.element_centres, margin_m)
                 if box is None:

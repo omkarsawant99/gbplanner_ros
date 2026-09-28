@@ -4,7 +4,8 @@
   <version>0.1.0</version>
   <description>
     Polls AutoAssess inspection plans from Cognite Data Fusion and publishes them (plan JSON,
-    inspection target poses, optional global planning bound) to the autonomy stack. Optionally
+    inspection target poses, the plan's reference map as a point cloud, optional global planning
+    bound) to the autonomy stack. Optionally
     uploads the finished mission (mesh, point clouds) to CDF as an AutoAssess campaign.
   </description>
 
@@ -19,6 +20,8 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
   <exec_depend>planner_msgs</exec_depend>
   <!-- cognite-sdk is not in rosdep: install it with pip3 install -r requirements.txt -->
 
