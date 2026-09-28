@@ -28,6 +28,7 @@ mesh_filename: ""               # same path as gbplanner_node's mesh_filename pa
 generate_mesh_service: /gbplanner_node/generate_mesh
 mesh_timeout_s: 30.0            # wait for the mesh file after generate_mesh
 mission_dir: ""                 # folder whose .ply/.pcd files are uploaded too ("" = none)
+findings_merge_radius_m: 0.5    # findings closer than this become one region task
 mission_end_quiet_s: 10.0       # no new /gbplanner_path for this long after homing ...
 mission_end_max_speed: 0.1      # ... and odometry speed (m/s) at most this -> mission finished
 path_topic: /gbplanner_path

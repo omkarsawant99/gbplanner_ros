@@ -6,7 +6,7 @@ find_package(catkin REQUIRED)
 catkin_python_setup()
 catkin_package()
 
-catkin_install_python(PROGRAMS scripts/autoassess_bridge_node
+catkin_install_python(PROGRAMS scripts/autoassess_bridge_node scripts/worker_node
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Upload a finished mission to CDF: CogniteFiles plus an AutoAssess campaign. ROS-free.
+"""Mission writes to CDF: CogniteFiles, the campaign, and the Draft findings plan. ROS-free.
 
-This is the only module that writes to CDF, and the node only uses it when ~upload_enabled is
-true. It follows the AutoAssess ground-station SDK (`dss campaign upload`):
+This is the only module that writes to CDF (cdf.py and map.py stay read-only), and the node
+only writes when ~upload_enabled is true. The upload follows the AutoAssess ground-station SDK
+(`dss campaign upload`):
 
 - every file is a CogniteFile node (cdf_cdm:CogniteFile/v1) in the AutoAssess space, with
   mimeType application/octet-stream and the tags autoassess, ply_mesh or pcd_pointcloud,
@@ -13,6 +14,10 @@ true. It follows the AutoAssess ground-station SDK (`dss campaign upload`):
 - the campaign is an InspectionResultView node result-<uuid4> with the area, today's date,
   status InProgress and createdBy autoassess_bridge; its file ids are set once the files are
   uploaded, then the status becomes Complete. Nothing existing is changed or deleted.
+
+At mission end the buffered /autoassess/findings also become a Draft inspection plan
+(`FindingsPlanService`, mirroring the SDK's `plans.create` + `add_region_tasks`), sequenced by
+`MissionFlow`: upload first, then the findings plan, then one final status carrying both.
 """
 
 from __future__ import annotations
@@ -32,10 +37,19 @@ from cognite.client.data_classes.data_modeling import NodeId, ViewId
 from cognite.client.data_classes.data_modeling.instances import NodeApply, NodeOrEdgeData
 
 from autoassess_bridge.cdf import SPACE
+from autoassess_bridge.findings import (
+    DEFAULT_MERGE_RADIUS_M,
+    Finding,
+    plan_tasks_from_findings,
+)
 
 CREATED_BY = "autoassess_bridge"
 MIME_TYPE = "application/octet-stream"
 INSPECTION_RESULT_VIEW = ("InspectionResultView", "1")
+INSPECTION_PLAN_VIEW = ("InspectionPlanView", "4")
+INSPECTION_TASK_VIEW = ("InspectionTaskView", "1")
+INSPECTION_TASK_CONTAINER = "InspectionTaskContainer"
+_TASK_CHUNK = 1000
 _MAX_EXTERNAL_ID = 255
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 _KINDS = {".ply": "ply", ".pcd": "pcd"}
@@ -45,7 +59,9 @@ _KINDS = {".ply": "ply", ".pcd": "pcd"}
 class MissionContext:
     area_external_id: str
     mission_id: str
-    plan_external_id: Optional[str] = None
+    plan_external_id: Optional[str] = None  # the flown plan
+    map_external_id: Optional[str] = None  # the flown plan's reference map
+    plan_name: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -294,9 +310,15 @@ def status_message(
     result: Optional[UploadResult] = None,
     message: str = "",
     skipped: Sequence[str] = (),
+    findings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Content of /autoassess/upload_status (published as JSON)."""
+    """Content of /autoassess/upload_status (published as JSON).
+
+    `findings` is filled on the final status of a mission: {"count", "planExternalId"} for the
+    created Draft findings plan, {"error": …} when creating it failed, null without findings.
+    """
     return {
+        "findings": findings,
         "state": state,  # idle | exporting_mesh | uploading | complete | failed
         "missionId": ctx.mission_id if ctx else None,
         "areaExternalId": ctx.area_external_id if ctx else None,
@@ -312,8 +334,16 @@ def status_message(
     }
 
 
+@dataclass(frozen=True)
+class FollowedPlan:
+    plan_external_id: str
+    area_external_id: str
+    map_external_id: Optional[str] = None
+    name: Optional[str] = None
+
+
 class FollowedPlans:
-    """Which plan (and so which area) the bridge followed when; thread-safe.
+    """Which plan (and so which area and map) the bridge followed when; thread-safe.
 
     at(t) is the plan followed at time t: the last one recorded at or before t, or the first one
     if the bridge only picked up a plan after t (it was started mid-mission).
@@ -321,31 +351,39 @@ class FollowedPlans:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._records: List[Tuple[float, str, str]] = []
+        self._records: List[Tuple[float, FollowedPlan]] = []
 
     def __len__(self) -> int:
         with self._lock:
             return len(self._records)
 
-    def record(self, now: float, plan_external_id: str, area_external_id: str) -> None:
+    def record(
+        self,
+        now: float,
+        plan_external_id: str,
+        area_external_id: str,
+        map_external_id: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        followed = FollowedPlan(plan_external_id, area_external_id, map_external_id, name)
         with self._lock:
-            if self._records and self._records[-1][1:] == (plan_external_id, area_external_id):
+            if self._records and self._records[-1][1] == followed:
                 return
-            self._records.append((now, plan_external_id, area_external_id))
+            self._records.append((now, followed))
 
-    def at(self, when: float) -> Optional[Tuple[str, str]]:
+    def at(self, when: float) -> Optional[FollowedPlan]:
         with self._lock:
             if not self._records:
                 return None
-            chosen = self._records[0]
-            for record in self._records:
-                if record[0] <= when:
-                    chosen = record
-            return chosen[1], chosen[2]
+            chosen = self._records[0][1]
+            for at_time, followed in self._records:
+                if at_time <= when:
+                    chosen = followed
+            return chosen
 
-    def latest(self) -> Optional[Tuple[str, str]]:
+    def latest(self) -> Optional[FollowedPlan]:
         with self._lock:
-            return self._records[-1][1:] if self._records else None
+            return self._records[-1][1] if self._records else None
 
 
 NO_PLAN_MESSAGE = (
@@ -420,3 +458,242 @@ class MissionUploadRunner:
         self._log.error(message)
         self._publish(status_message("failed", ctx, message=message, skipped=skipped))
         return False, message
+
+
+# --- findings plan --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FindingsPlanResult:
+    plan_external_id: str
+    task_count: int
+    already_in_plan: int = 0
+
+
+class FindingsPlanService:
+    """Creates the Draft findings plan in CDF, mirroring the AutoAssess SDK.
+
+    The plan node is `plan-<uuid4>` (Draft, area, optional map relation, provenance in the
+    description); each task is a `task-<uuid4>` region task with a `finding:` suggestionId.
+    A `mission id -> plan externalId` registry makes retries idempotent: the retry re-reads the
+    plan's task suggestionIds and only findings not yet covered become new tasks.
+    `log` needs info() and warning().
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        log: Any,
+        space: str = SPACE,
+        merge_radius_m: float = DEFAULT_MERGE_RADIUS_M,
+        new_uuid: Callable[[], uuid.UUID] = uuid.uuid4,
+    ) -> None:
+        self._client = client
+        self._log = log
+        self._space = space
+        self._merge_radius_m = merge_radius_m
+        self._new_uuid = new_uuid
+        self._plans: Dict[str, str] = {}  # mission id -> findings plan externalId
+
+    def create(
+        self,
+        ctx: MissionContext,
+        map_external_id: Optional[str],
+        findings: Sequence[Finding],
+    ) -> FindingsPlanResult:
+        if not findings:
+            raise ValueError("No findings to create a plan from")
+        plan_external_id = self._plans.get(ctx.mission_id)
+        existing = self._task_suggestion_ids(plan_external_id) if plan_external_id else []
+        task_plan = plan_tasks_from_findings(
+            findings,
+            merge_radius_m=self._merge_radius_m,
+            existing_suggestion_ids=existing,
+        )
+        if plan_external_id is None:
+            plan_external_id = self._create_plan(ctx, map_external_id)
+            self._plans[ctx.mission_id] = plan_external_id
+        if task_plan.tasks:
+            self._add_tasks(plan_external_id, task_plan.tasks)
+        self._log.info(
+            "Findings plan {}: {} task(s) created, {} finding(s) already covered".format(
+                plan_external_id, len(task_plan.tasks), task_plan.already_in_plan
+            )
+        )
+        return FindingsPlanResult(
+            plan_external_id,
+            task_count=len(task_plan.tasks),
+            already_in_plan=task_plan.already_in_plan,
+        )
+
+    def _create_plan(self, ctx: MissionContext, map_external_id: Optional[str]) -> str:
+        external_id = "plan-{}".format(self._new_uuid())
+        description = "Created by {} from mission {}".format(CREATED_BY, ctx.mission_id)
+        if ctx.plan_external_id:
+            description += " / plan {}".format(ctx.plan_external_id)
+        properties: Dict[str, Any] = {
+            "area": {"space": self._space, "externalId": ctx.area_external_id},
+            "status": "Draft",
+            "name": "Findings {}".format(ctx.mission_id),
+            "description": description,
+        }
+        if map_external_id:
+            properties["map"] = {"space": self._space, "externalId": map_external_id}
+        else:
+            self._log.warning(
+                "Findings plan {} gets no reference map: the flown plan had none and no "
+                "campaign was uploaded".format(external_id)
+            )
+        self._client.data_modeling.instances.apply(
+            nodes=[
+                NodeApply(
+                    space=self._space,
+                    external_id=external_id,
+                    sources=[
+                        NodeOrEdgeData(
+                            source=ViewId(self._space, *INSPECTION_PLAN_VIEW),
+                            properties=properties,
+                        )
+                    ],
+                )
+            ]
+        )
+        return external_id
+
+    def _add_tasks(self, plan_external_id: str, tasks: Sequence[Any]) -> None:
+        nodes = []
+        for task in tasks:
+            properties = {
+                "plan": {"space": self._space, "externalId": plan_external_id},
+                "taskType": "region",
+                "inspectionType": task.inspection_type,
+                "position3d": [float(v) for v in task.position3d],
+                "normalVector": [float(v) for v in task.normal_vector],
+                "radiusM": float(task.radius_m),
+                "suggestionId": task.suggestion_id,
+            }
+            nodes.append(
+                NodeApply(
+                    space=self._space,
+                    external_id="task-{}".format(uuid.uuid4()),
+                    sources=[
+                        NodeOrEdgeData(
+                            source=ViewId(self._space, *INSPECTION_TASK_VIEW),
+                            properties=properties,
+                        )
+                    ],
+                )
+            )
+        for i in range(0, len(nodes), _TASK_CHUNK):
+            self._client.data_modeling.instances.apply(nodes=nodes[i : i + _TASK_CHUNK])
+
+    def _task_suggestion_ids(self, plan_external_id: str) -> List[str]:
+        view = ViewId(self._space, *INSPECTION_TASK_VIEW)
+        items = self._client.data_modeling.instances.list(
+            instance_type="node",
+            sources=[view],
+            filter={
+                "equals": {
+                    "property": [self._space, INSPECTION_TASK_CONTAINER, "plan"],
+                    "value": {"space": self._space, "externalId": plan_external_id},
+                }
+            },
+            limit=10000,
+        )
+        ids: List[str] = []
+        for item in items:
+            props = dict((getattr(item, "properties", None) or {}).get(view) or {})
+            sid = props.get("suggestionId")
+            if sid:
+                ids.append(str(sid))
+        return ids
+
+
+class MissionFlow:
+    """One mission's writes in order: upload, findings plan, then one final status.
+
+    The runner is constructed with `publish_status=flow.runner_publish_status`: intermediate
+    statuses pass through, the terminal one (complete/failed) is held back until the findings
+    plan is created, then published once with the `findings` field filled in. A partial upload
+    failure still creates the findings plan. When creating it fails, the buffer is kept for a
+    `~submit_findings` retry. `log` needs info(), warning() and error().
+    """
+
+    def __init__(self, runner: Optional[Any], findings_service: Any, buffer: Any,
+                 publish_status: Callable[[Dict[str, Any]], None], log: Any) -> None:
+        self._runner = runner  # may be bound later (the runner needs runner_publish_status)
+        self._service = findings_service
+        self._buffer = buffer
+        self._publish = publish_status
+        self._log = log
+        self._held: Optional[Dict[str, Any]] = None
+        self._lock = threading.Lock()
+
+    def bind(self, runner: Any) -> None:
+        self._runner = runner
+
+    def runner_publish_status(self, status: Dict[str, Any]) -> None:
+        if status.get("state") in ("complete", "failed"):
+            self._held = status
+        else:
+            self._publish(status)
+
+    def run(self, ctx: Optional[MissionContext]) -> Tuple[bool, str]:
+        if not self._lock.acquire(False):
+            return False, "An upload is already running"
+        try:
+            return self._run_locked(ctx)
+        finally:
+            self._lock.release()
+
+    def _run_locked(self, ctx: Optional[MissionContext]) -> Tuple[bool, str]:
+        if ctx is None:
+            self._publish(status_message("failed", None, message=NO_PLAN_MESSAGE))
+            self._log.error(NO_PLAN_MESSAGE)
+            return False, NO_PLAN_MESSAGE
+        self._held = None
+        ok, message = self._runner.run(ctx)
+        findings_info, note = self._create_findings_plan(ctx)
+        final = self._held or status_message("complete" if ok else "failed", ctx, message=message)
+        final["findings"] = findings_info
+        final["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        self._publish(final)
+        return ok, message + note
+
+    def submit_findings(self, ctx: Optional[MissionContext]) -> Tuple[bool, str]:
+        """Manual ~submit_findings: create the plan from the current buffer, outside an upload."""
+        if ctx is None:
+            return False, NO_PLAN_MESSAGE
+        snapshot = self._buffer.snapshot()
+        if not snapshot:
+            return False, "No findings buffered"
+        try:
+            result = self._service.create(ctx, ctx.map_external_id, snapshot)
+        except Exception as exc:  # noqa: BLE001 - report; the buffer is kept for a retry
+            message = "Creating the findings plan failed: {}: {}".format(type(exc).__name__, exc)
+            self._log.error(message)
+            return False, message
+        self._buffer.discard([f.id for f in snapshot])
+        return True, "Created findings plan {} with {} task(s)".format(
+            result.plan_external_id, result.task_count
+        )
+
+    def _create_findings_plan(
+        self, ctx: MissionContext
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        snapshot = self._buffer.snapshot()
+        if not snapshot:
+            return None, ""
+        campaign = (self._held or {}).get("campaignExternalId")
+        map_external_id = ctx.map_external_id or campaign
+        try:
+            result = self._service.create(ctx, map_external_id, snapshot)
+        except Exception as exc:  # noqa: BLE001 - keep the buffer for ~submit_findings
+            message = "Creating the findings plan failed (findings kept for ~submit_findings): "                 "{}: {}".format(type(exc).__name__, exc)
+            self._log.error(message)
+            return {"error": "{}: {}".format(type(exc).__name__, exc)}, ""
+        self._buffer.discard([f.id for f in snapshot])
+        return (
+            {"count": result.task_count, "planExternalId": result.plan_external_id},
+            "; findings plan {} ({} task(s))".format(result.plan_external_id, result.task_count),
+        )

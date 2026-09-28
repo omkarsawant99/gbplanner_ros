@@ -148,6 +148,21 @@ def test_latest_ready_plan_combines_vessel_and_area_filters() -> None:
     assert [list(f)[0] for f in plan_call["filter"]["and"]] == ["equals", "not", "equals", "in"]
 
 
+def test_the_bridges_own_draft_findings_plan_is_never_followed() -> None:
+    # The bridge creates Draft findings plans at mission end; the Ready filter must keep it
+    # from re-following its own output even when that plan is the newest one.
+    client = FakeClient()
+    client.instances.add(PLAN_VIEW, _plan_node("p-flown", created=1, updated=10))
+    client.instances.add(
+        PLAN_VIEW, _plan_node("plan-findings", status="Draft", created=99, updated=99)
+    )
+
+    plan = cdf.PlanSource(client).latest_ready_plan()
+
+    assert plan is not None
+    assert plan.external_id == "p-flown"
+
+
 def test_latest_ready_plan_returns_none_without_ready_plans() -> None:
     client = FakeClient()
     client.instances.add(PLAN_VIEW, _plan_node("p-draft", status="Draft"))

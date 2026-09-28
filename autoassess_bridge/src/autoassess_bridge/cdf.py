@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Read-only access to AutoAssess inspection plans in Cognite Data Fusion (CDF).
 
+This module never writes; every write the bridge makes (mission upload, campaign, findings
+plan) lives in upload.py.
+
 Only `data_modeling.instances.list` and `data_modeling.instances.retrieve` are called. The plan
 JSON built here has the same shape as the file written by the AutoAssess ground-station CLI
 (`dss plan download`), so consumers can treat both the same.

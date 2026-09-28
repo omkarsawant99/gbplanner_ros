@@ -8,7 +8,8 @@ Cognite Data Fusion (CDF). It does three things:
 2. It publishes the plan's **reference map** as a latched point cloud on
    `/ballast_tank/pointcloud`. You no longer need to download the map and run `pcd_to_pointcloud`.
 3. Optionally, it **uploads the finished mission** (mesh and point clouds) as a new AutoAssess
-   campaign.
+   campaign, and turns findings reported on `/autoassess/findings` into a **Draft inspection
+   plan** for review.
 
 By default the node only reads from CDF (`instances.list` / `instances.retrieve`, file
 downloads). With `~upload_enabled: true` it also writes the mission upload
@@ -116,6 +117,51 @@ goes out as a latched `sensor_msgs/PointCloud2` on `~map_topic` (default
 - **Plans without a map.** A plan without a `mapExternalId` is logged once, and the last map
   stays published.
 
+## Findings from the robot
+
+The detection stack reports findings by publishing JSON on `/autoassess/findings`
+(`std_msgs/String`) — one object, or an array of objects:
+
+```json
+{
+  "x": 1.0, "y": 2.0, "z": 3.0,
+  "id": "corr-001",
+  "nx": 0.0, "ny": 0.0, "nz": 1.0,
+  "radius": 0.3,
+  "inspection_type": "visual",
+  "class": "corrosion",
+  "confidence": 0.9,
+  "description": "pitting near the weld"
+}
+```
+
+| field | meaning |
+| --- | --- |
+| `x, y, z` (required) | position in metres, in the reference map's frame (`world`) |
+| `id` | stable finding id; default: a hash of the values. Repeats are deduped |
+| `nx, ny, nz` | surface normal (all three or none) |
+| `radius` | task radius in metres (default 0.3) |
+| `inspection_type` | `visual` (default) or `ndt_thickness` |
+| `class`, `confidence`, `description` | optional metadata (`confidence` 0..1) |
+
+Bad entries are logged (once per distinct error) and skipped; good ones are buffered for the
+current mission. At mission end — after the upload, in the same step — the buffered findings
+become a **Draft** inspection plan in the flown plan's area: findings closer than
+`~findings_merge_radius_m` (0.5 m) merge into one region task, each task carries
+`suggestionId: finding:<id>[+<id>…]`, and the plan's description records the provenance
+("Created by autoassess_bridge from mission … / plan …"). The plan's reference map is the
+flown plan's; if that had none, the just-uploaded campaign. The final
+`/autoassess/upload_status` then has `findings: {"count": …, "planExternalId": …}`.
+Normals: the finding's own, else facing the findings' centroid (mesh-based estimation is a
+follow-up). An inspector reviews the Draft in the AutoAssess viewer and marks it Ready; the
+bridge never follows its own Draft plans.
+
+- The topic is always subscribed. With `~upload_enabled: false` the node warns that no plan
+  will be created.
+- If creating the plan fails, the findings are kept; `~submit_findings` (`std_srvs/Trigger`)
+  retries just the plan. Retries are idempotent (existing `finding:` suggestion ids are
+  skipped). Re-detections in a *later* mission intentionally land in that mission's new plan.
+
 ## Mission upload
 
 Off unless `~upload_enabled: true`. An upload sends the mission's output to CDF, where the
@@ -169,8 +215,55 @@ All parameters are private (`~`), with defaults in
 | --- | --- |
 | Plan | `vessel_external_id`, `area_external_id` (optional filters), `space`, `poll_period_s`, `frame_id`, `standoff_m` |
 | Reference map | `publish_map`, `map_topic`, `map_frame_id`, `map_file_label`, `map_cache_dir` |
+| Findings | `findings_merge_radius_m` |
 | Global bound | `set_global_bound`, `bound_margin_m`, `global_bound_service`, `service_timeout_s` |
 | Mission upload | `upload_enabled`, `upload_on_mission_end`, `mesh_filename`, `generate_mesh_service`, `mesh_timeout_s`, `mission_dir`, `mission_end_quiet_s`, `mission_end_max_speed`, `path_topic`, `homing_topic` |
+
+## Running the worker with the bridge (full loop)
+
+The 3D models the viewer streams are built by the AutoAssess SDK's `dss worker` (upcoming,
+not released yet). `launch/autoassess_full.launch` runs the bridge **and** that worker under
+roslaunch, so one launch gives the whole loop:
+
+```bash
+roslaunch autoassess_bridge autoassess_full.launch     area_external_id:=area-XXXX uidss_dir:=/path/to/autoassess-sdk
+```
+
+- `area_external_id` is **mandatory** here: the worker only builds models for that area's
+  meshes (`scripts/worker_node` refuses a command without `--area`, because an unfiltered
+  worker would build for the whole CDF project).
+- The worker is run as `uv run --project <uidss_dir> dss worker --area … --poll 30`, wrapped
+  in the thin `worker_node` exec script with roslaunch `respawn="true" respawn_delay="30"`
+  (`dss worker` loops by itself; respawn only covers exits).
+
+**Install once** (ground station):
+
+```bash
+git clone <the AutoAssess SDK repository> autoassess-sdk
+cd autoassess-sdk && uv sync   # first run downloads a Python interpreter — takes minutes
+uv run dss --help              # warm-up / sanity check
+```
+
+Under systemd, services have a minimal `PATH`: pass the absolute uv path with
+`uv:=/home/robot/.local/bin/uv` (or a full `worker_command:=…`). A unit example:
+
+```ini
+[Unit]
+Description=AutoAssess bridge + worker
+After=network-online.target
+
+[Service]
+User=robot
+EnvironmentFile=/home/robot/autoassess/.env
+ExecStart=/opt/ros/noetic/env.sh roslaunch autoassess_bridge autoassess_full.launch     area_external_id:=area-XXXX uidss_dir:=/home/robot/autoassess-sdk uv:=/home/robot/.local/bin/uv
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Alternatively run the worker in Docker next to ROS: `docker run --env-file .env <sdk image>
+dss worker --area area-XXXX --poll 30` — the worker only needs CDF, not ROS.
 
 ## Credentials
 
@@ -208,6 +301,7 @@ The logic lives in the ROS-free package `src/autoassess_bridge`. Only
 | `poller.py` | change detection |
 | `bound.py` | global-bound retries |
 | `map.py` | reference map |
+| `findings.py` | findings parsing, buffer, merging, task planning |
 | `upload.py` | mission upload |
 | `mission_end.py` | mission-end detection |
 

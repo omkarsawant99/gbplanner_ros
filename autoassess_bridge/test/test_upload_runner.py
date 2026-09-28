@@ -12,6 +12,7 @@ from conftest import RecordingLog
 
 from autoassess_bridge import upload
 from autoassess_bridge.upload import (
+    FollowedPlan,
     FollowedPlans,
     MissionContext,
     MissionFile,
@@ -215,16 +216,16 @@ def test_followed_plans_gives_the_plan_active_at_the_mission_start() -> None:
     plans.record(10.0, "p-1", "area-1")
     plans.record(50.0, "p-2", "area-2")
 
-    assert plans.at(30.0) == ("p-1", "area-1")
-    assert plans.at(50.0) == ("p-2", "area-2")
-    assert plans.at(99.0) == ("p-2", "area-2")
+    assert plans.at(30.0) == FollowedPlan("p-1", "area-1")
+    assert plans.at(50.0) == FollowedPlan("p-2", "area-2")
+    assert plans.at(99.0) == FollowedPlan("p-2", "area-2")
 
 
 def test_followed_plans_uses_the_first_plan_for_a_mission_started_before_it() -> None:
     plans = FollowedPlans()
     plans.record(10.0, "p-1", "area-1")
 
-    assert plans.at(5.0) == ("p-1", "area-1")
+    assert plans.at(5.0) == FollowedPlan("p-1", "area-1")
 
 
 def test_followed_plans_is_empty_until_a_plan_is_followed() -> None:
@@ -237,7 +238,7 @@ def test_followed_plans_latest() -> None:
     plans.record(10.0, "p-1", "area-1")
     plans.record(20.0, "p-2", "area-2")
 
-    assert plans.latest() == ("p-2", "area-2")
+    assert plans.latest() == FollowedPlan("p-2", "area-2")
 
 
 def test_followed_plans_ignores_a_repeat_of_the_current_plan() -> None:
@@ -245,8 +246,24 @@ def test_followed_plans_ignores_a_repeat_of_the_current_plan() -> None:
     plans.record(10.0, "p-1", "area-1")
     plans.record(20.0, "p-1", "area-1")
 
-    assert plans.at(15.0) == ("p-1", "area-1")
+    assert plans.at(15.0) == FollowedPlan("p-1", "area-1")
     assert len(plans) == 1
+
+
+def test_followed_plans_keeps_map_and_name() -> None:
+    plans = FollowedPlans()
+    plans.record(10.0, "p-1", "area-1", map_external_id="result-m", name="Weekly")
+
+    assert plans.at(10.0) == FollowedPlan("p-1", "area-1", "result-m", "Weekly")
+
+
+def test_followed_plans_records_a_map_change_of_the_same_plan() -> None:
+    plans = FollowedPlans()
+    plans.record(10.0, "p-1", "area-1", map_external_id=None)
+    plans.record(20.0, "p-1", "area-1", map_external_id="result-m")
+
+    assert plans.at(15.0) == FollowedPlan("p-1", "area-1", None)
+    assert plans.at(25.0) == FollowedPlan("p-1", "area-1", "result-m")
 
 
 def test_idle_status_has_no_mission() -> None:

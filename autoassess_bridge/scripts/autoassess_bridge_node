@@ -13,9 +13,11 @@ plan's reference map (a point cloud of the plan's map campaign, cached locally) 
 Optionally sends the area box to gbplanner's set_global_bound service.
 Credentials come from COGNITE_* env variables.
 
-With ~upload_enabled (default false) it also uploads a finished mission to CDF (the only
-writes this node makes): the gbplanner mesh plus the ~mission_dir files as CogniteFiles, and an
-AutoAssess campaign that lists them. An upload runs on the ~upload_mission service
+Findings from the detection stack arrive as JSON on /autoassess/findings (always subscribed,
+buffered per mission). With ~upload_enabled (default false) the node writes the mission to CDF
+(its only writes): the gbplanner mesh plus the ~mission_dir files as CogniteFiles, an
+AutoAssess campaign that lists them, and a Draft findings plan built from the buffered
+findings (~submit_findings retries just that). An upload runs on the ~upload_mission service
 (std_srvs/Trigger) and, with ~upload_on_mission_end, when the mission looks finished
 (homing, no new path for ~mission_end_quiet_s, robot still). Progress: /autoassess/upload_status.
 """
@@ -37,13 +39,16 @@ from std_srvs.srv import Empty, Trigger, TriggerResponse
 
 from autoassess_bridge import cdf
 from autoassess_bridge.bound import GlobalBoundSetter, ServiceUnavailable
+from autoassess_bridge.findings import FindingsBuffer, parse_findings_json
 from autoassess_bridge.map import DEFAULT_CACHE_DIR, MapSource, MapUpdater
 from autoassess_bridge.mission_end import MissionEndDetector
 from autoassess_bridge.plan import area_bounds, plan_to_poses
 from autoassess_bridge.poller import PlanPoller
 from autoassess_bridge.upload import (
-    MissionContext,
+    FindingsPlanService,
     FollowedPlans,
+    MissionContext,
+    MissionFlow,
     MissionUploader,
     MissionUploadRunner,
     export_mesh,
@@ -92,12 +97,41 @@ def make_mesh_export(service_name, mesh_filename, service_timeout_s, mesh_timeou
     return lambda: export_mesh(generate, mesh_filename, mesh_timeout_s)
 
 
+class FindingsListener:
+    """Buffers /autoassess/findings. Always on, so misconfiguration stays visible."""
+
+    def __init__(self, buffer, upload_enabled):
+        self._buffer = buffer
+        self._upload_enabled = upload_enabled
+        self._warned_disabled = False
+        self._logged_errors = set()
+        rospy.Subscriber("/autoassess/findings", String, self._on_findings)
+
+    def _on_findings(self, msg):
+        findings, errors = parse_findings_json(msg.data)
+        added = sum(1 for finding in findings if self._buffer.add(finding))
+        for error in errors:
+            if error not in self._logged_errors and len(self._logged_errors) < 200:
+                self._logged_errors.add(error)
+                rospy.logwarn("Bad finding skipped: %s", error)
+        if added:
+            rospy.loginfo("Buffered %d finding(s), %d in total", added, len(self._buffer))
+        if not self._upload_enabled and not self._warned_disabled and (findings or errors):
+            self._warned_disabled = True
+            rospy.logwarn(
+                "Findings received but ~upload_enabled is false: no findings plan will be created"
+            )
+        if self._buffer.dropped:
+            rospy.logwarn_throttle(60, "Findings buffer full: %d dropped", self._buffer.dropped)
+
+
 class MissionUploads:
     """ROS wiring around MissionUploadRunner: status topic, Trigger service, auto trigger."""
 
-    def __init__(self, client, space, followed):
-        self._followed = followed  # FollowedPlans: the plan (and area) followed when
+    def __init__(self, client, space, followed, findings_buffer):
+        self._followed = followed  # FollowedPlans: the plan (and area and map) followed when
         self._last_failed = None
+        self._last_ctx = None  # the last mission ctx, for ~submit_findings after a failure
         self._status_pub = rospy.Publisher("/autoassess/upload_status", String, queue_size=1, latch=True)
         mesh_filename = rospy.get_param("~mesh_filename", "")
         mission_dir = rospy.get_param("~mission_dir", "") or None
@@ -111,12 +145,21 @@ class MissionUploads:
             )
         else:
             rospy.logwarn("~mesh_filename is empty: uploads contain only the ~mission_dir files")
-        self._runner = MissionUploadRunner(
-            MissionUploader(client, RosLog(), space=space),
-            export_mesh=exporter,
-            mission_dir=mission_dir,
-            publish_status=self._publish,
-            log=RosLog(),
+        findings_service = FindingsPlanService(
+            client,
+            RosLog(),
+            space=space,
+            merge_radius_m=float(rospy.get_param("~findings_merge_radius_m", 0.5)),
+        )
+        self._flow = MissionFlow(None, findings_service, findings_buffer, self._publish, RosLog())
+        self._flow.bind(
+            MissionUploadRunner(
+                MissionUploader(client, RosLog(), space=space),
+                export_mesh=exporter,
+                mission_dir=mission_dir,
+                publish_status=self._flow.runner_publish_status,
+                log=RosLog(),
+            )
         )
         self._detector = None
         if bool(rospy.get_param("~upload_on_mission_end", True)):
@@ -128,6 +171,7 @@ class MissionUploads:
             rospy.Subscriber(rospy.get_param("~homing_topic", "/gbplanner_is_homing"), Bool, self._on_homing)
             rospy.Subscriber("odometry", Odometry, self._on_odometry)
         rospy.Service("~upload_mission", Trigger, self._on_trigger)
+        rospy.Service("~submit_findings", Trigger, self._on_submit_findings)
         self._publish(status_message("idle", None))
         rospy.loginfo(
             "Mission upload enabled (%s)",
@@ -144,9 +188,16 @@ class MissionUploads:
             threading.Thread(target=self._run, args=(ctx,), daemon=True).start()
 
     def _run(self, ctx):
-        ok, _message = self._runner.run(ctx)
+        if ctx is not None:
+            self._last_ctx = ctx
+        ok, _message = self._flow.run(ctx)
         self._last_failed = None if ok else ctx
         return ok, _message
+
+    def _on_submit_findings(self, _req):
+        ctx = self._last_ctx or self._context(time.time())
+        ok, message = self._flow.submit_findings(ctx)
+        return TriggerResponse(success=ok, message=message)
 
     def _on_trigger(self, _req):
         started_at = self._detector.mission_started_at if self._detector else None
@@ -166,8 +217,13 @@ class MissionUploads:
         followed = self._followed.at(started_at)
         if followed is None:
             return None
-        plan_id, area_id = followed
-        return MissionContext(area_id, mission_id_for(started_at), plan_id)
+        return MissionContext(
+            followed.area_external_id,
+            mission_id_for(started_at),
+            followed.plan_external_id,
+            map_external_id=followed.map_external_id,
+            plan_name=followed.name,
+        )
 
     def _publish(self, status):
         self._status_pub.publish(String(data=json.dumps(status)))
@@ -260,9 +316,12 @@ def main():
         rospy.loginfo("Publishing the plan's reference map on %s", map_topic)
 
     followed = FollowedPlans()
+    upload_enabled = bool(rospy.get_param("~upload_enabled", False))
+    findings_buffer = FindingsBuffer()
+    FindingsListener(findings_buffer, upload_enabled)
     uploads = None
-    if bool(rospy.get_param("~upload_enabled", False)):
-        uploads = MissionUploads(client, space, followed)
+    if upload_enabled:
+        uploads = MissionUploads(client, space, followed, findings_buffer)
 
     rate = rospy.Rate(1.0)
     next_poll = 0.0
@@ -280,7 +339,13 @@ def main():
         next_poll = time.time() + period_s
         update = poller.poll()
         if update is not None:
-            followed.record(time.time(), update.plan["planExternalId"], update.area.external_id)
+            followed.record(
+                time.time(),
+                update.plan["planExternalId"],
+                update.area.external_id,
+                map_external_id=update.plan.get("mapExternalId"),
+                name=update.plan.get("name"),
+            )
             poses, skipped = plan_to_poses(update.plan, standoff_m)
             plan_pub.publish(String(data=cdf.dumps_plan(update.plan)))
             targets_pub.publish(to_pose_array(poses, frame_id))
