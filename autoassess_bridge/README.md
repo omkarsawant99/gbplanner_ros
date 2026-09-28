@@ -171,6 +171,16 @@ ROS parameters or files: `COGNITE_PROJECT`, `COGNITE_CLUSTER`, `COGNITE_TENANT_I
 - The client needs read access to the AutoAssess data-model space and to files (for the map).
 - Uploads also need `files:write` and `dataModelInstances:write` on the AutoAssess space.
 
+**Using a `.env` file:** copy [`.env.example`](.env.example) to `autoassess_bridge/.env` (git-ignored) and fill in the values, then load it in the shell that launches the node:
+
+```bash
+cp autoassess_bridge/.env.example autoassess_bridge/.env   # once; edit the values
+set -a; source autoassess_bridge/.env; set +a
+roslaunch autoassess_bridge autoassess_bridge.launch area_external_id:=area-XXXX
+```
+
+With Docker, pass it with `docker run --env-file autoassess_bridge/.env …`. Never commit `.env`.
+
 A missing variable or a missing `area_external_id` stops the node with a clear message.
 
 ## Tests
