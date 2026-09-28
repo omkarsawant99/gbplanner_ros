@@ -231,6 +231,21 @@ def test_submit_findings_creates_defects_with_the_missions_campaign() -> None:
     assert len(buffer) == 0
 
 
+def test_flow_first_mapping_passes_no_campaign_to_the_defects() -> None:
+    ctx = MissionContext("area-1", MISSION, None, first_mapping=True)
+    service = _FakeService()
+    statuses: List[Dict[str, Any]] = []
+
+    ok, _ = _flow(_FakeRunner(ok=True, campaign=None), service, _buffer([Finding("a", (1, 2, 3))]), statuses).run(ctx)
+
+    assert ok
+    ((_, campaign, _),) = service.calls
+    assert campaign is None
+    assert statuses[-1]["campaignExternalId"] is None
+    assert statuses[-1]["note"] == "no plan followed: uploaded without a campaign (first mapping)"
+    assert statuses[-1]["findings"]["count"] == 1
+
+
 def test_submit_findings_without_findings_fails() -> None:
     ok, message = _flow(_FakeRunner(ok=True), _FakeService(), _buffer([]), []).submit_findings(CTX)
 
@@ -262,7 +277,7 @@ def _buffer(findings: List[Finding]) -> FindingsBuffer:
 class _FakeRunner:
     """Publishes intermediate + terminal statuses through the flow's gate, like the real one."""
 
-    def __init__(self, ok: bool, campaign: str = CAMPAIGN) -> None:
+    def __init__(self, ok: bool, campaign: Optional[str] = CAMPAIGN) -> None:
         self._ok = ok
         self._campaign = campaign
         self.publish_status = None  # type: Optional[Any]

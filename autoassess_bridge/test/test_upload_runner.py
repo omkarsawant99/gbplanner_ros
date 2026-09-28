@@ -266,6 +266,32 @@ def test_followed_plans_records_a_map_change_of_the_same_plan() -> None:
     assert plans.at(25.0) == FollowedPlan("p-1", "area-1", "result-m")
 
 
+def test_first_mapping_status_notes_the_missing_campaign() -> None:
+    ctx = MissionContext("area-1", "mission-x", None, first_mapping=True)
+
+    status = upload.status_message("complete", ctx)
+
+    assert status["campaignExternalId"] is None
+    assert status["note"] == "no plan followed: uploaded without a campaign (first mapping)"
+
+
+def test_normal_status_has_an_empty_note() -> None:
+    assert upload.status_message("complete", CTX)["note"] is None
+
+
+def test_run_message_says_first_mapping_without_a_campaign(tmp_path: Any) -> None:
+    mesh = _write(str(tmp_path / "mesh.ply"), "ply")
+    ctx = MissionContext("area-1", "mission-x", None, first_mapping=True)
+    uploader = _FakeUploader(campaign=None)
+    statuses: List[Dict[str, Any]] = []
+
+    ok, message = _runner(uploader, statuses, export=lambda: mesh).run(ctx)
+
+    assert ok
+    assert "without a campaign (first mapping)" in message
+    assert statuses[-1]["campaignExternalId"] is None
+
+
 def test_idle_status_has_no_mission() -> None:
     status = upload.status_message("idle", None)
 
@@ -278,17 +304,19 @@ def test_idle_status_has_no_mission() -> None:
 
 
 class _FakeUploader:
-    def __init__(self, failed: Optional[List[Any]] = None, raises: Optional[Exception] = None) -> None:
+    def __init__(self, failed: Optional[List[Any]] = None, raises: Optional[Exception] = None,
+                 campaign: Optional[str] = "result-1") -> None:
         self.calls: List[List[MissionFile]] = []
         self._failed = failed or []
         self._raises = raises
+        self._campaign = campaign
 
     def upload(self, ctx: MissionContext, files: List[MissionFile]) -> UploadResult:
         self.calls.append(list(files))
         if self._raises is not None:
             raise self._raises
         return UploadResult(
-            campaign_external_id="result-1",
+            campaign_external_id=self._campaign,
             cdf_file_ids=[11],
             pcd_file_ids=[],
             pcd_file_labels=[],

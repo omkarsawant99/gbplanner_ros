@@ -58,6 +58,12 @@ class MissionContext:
     plan_external_id: Optional[str] = None  # the flown plan
     map_external_id: Optional[str] = None  # the flown plan's reference map
     plan_name: Optional[str] = None
+    # First mapping: no plan was followed, but ~area_external_id is configured. The upload
+    # proceeds without a campaign; the files are grouped later in the viewer.
+    first_mapping: bool = False
+
+
+FIRST_MAPPING_NOTE = "no plan followed: uploaded without a campaign (first mapping)"
 
 
 @dataclass(frozen=True)
@@ -69,7 +75,7 @@ class MissionFile:
 
 @dataclass
 class UploadResult:
-    campaign_external_id: str
+    campaign_external_id: Optional[str]  # None on a first-mapping (campaign-less) upload
     cdf_file_ids: List[int]
     pcd_file_ids: List[int]
     pcd_file_labels: List[str]
@@ -170,10 +176,12 @@ class MissionUploader:
     def upload(self, ctx: MissionContext, files: Sequence[MissionFile]) -> UploadResult:
         if not files:
             raise ValueError("Nothing to upload")
-        campaign = self._campaigns.get(ctx.mission_id)
-        if campaign is None:
-            campaign = self._create_campaign(ctx.area_external_id)
-            self._campaigns[ctx.mission_id] = campaign
+        campaign = None  # first mapping: files only, grouped in the viewer later
+        if not ctx.first_mapping:
+            campaign = self._campaigns.get(ctx.mission_id)
+            if campaign is None:
+                campaign = self._create_campaign(ctx.area_external_id)
+                self._campaigns[ctx.mission_id] = campaign
         result = UploadResult(campaign, [], [], [])
         for mission_file in files:
             try:
@@ -188,17 +196,18 @@ class MissionUploader:
             else:
                 result.pcd_file_ids.append(file_id)
                 result.pcd_file_labels.append(str(mission_file.label))
-        self._apply_campaign(
-            campaign,
-            {
-                "cdfFileIds": result.cdf_file_ids,
-                "pcdFileIds": result.pcd_file_ids,
-                "pcdFileLabels": result.pcd_file_labels,
-            },
-        )
-        if result.complete:
-            self._apply_campaign(campaign, {"status": "Complete"})
-            self._log.info("Campaign {} complete".format(campaign))
+        if campaign is not None:
+            self._apply_campaign(
+                campaign,
+                {
+                    "cdfFileIds": result.cdf_file_ids,
+                    "pcdFileIds": result.pcd_file_ids,
+                    "pcdFileLabels": result.pcd_file_labels,
+                },
+            )
+            if result.complete:
+                self._apply_campaign(campaign, {"status": "Complete"})
+                self._log.info("Campaign {} complete".format(campaign))
         return result
 
     def _create_campaign(self, area_external_id: str) -> str:
@@ -326,6 +335,7 @@ def status_message(
         "pcdFileLabels": list(result.pcd_file_labels) if result else [],
         "failedFiles": [{"path": p, "error": e} for p, e in result.failed] if result else [],
         "skippedFiles": list(skipped),
+        "note": FIRST_MAPPING_NOTE if ctx is not None and ctx.first_mapping else None,
         "message": message,
         "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
@@ -440,13 +450,23 @@ class MissionUploadRunner:
         except Exception as exc:  # noqa: BLE001 - report and stop
             return self._fail(ctx, "Upload failed: {}: {}".format(type(exc).__name__, exc), skipped)
         if result.complete:
-            message = "Uploaded {} file(s) to campaign {}".format(len(files), result.campaign_external_id)
+            if result.campaign_external_id is not None:
+                message = "Uploaded {} file(s) to campaign {}".format(
+                    len(files), result.campaign_external_id
+                )
+            else:
+                message = "Uploaded {} file(s) without a campaign (first mapping)".format(len(files))
             self._log.info(message)
             self._publish(status_message("complete", ctx, result, message, skipped))
             return True, message
-        message = "{} of {} file(s) failed; campaign {} stays InProgress (retry to resume)".format(
-            len(result.failed), len(files), result.campaign_external_id
-        )
+        if result.campaign_external_id is not None:
+            message = "{} of {} file(s) failed; campaign {} stays InProgress (retry to resume)".format(
+                len(result.failed), len(files), result.campaign_external_id
+            )
+        else:
+            message = "{} of {} file(s) failed on the first-mapping upload (retry to resume)".format(
+                len(result.failed), len(files)
+            )
         self._log.error(message)
         self._publish(status_message("failed", ctx, result, message, skipped))
         return False, message
@@ -504,8 +524,8 @@ class DefectService:
         existing = self._existing(external_ids)
         if campaign_external_id is None:
             self._log.warning(
-                "Mission {} has no campaign (upload failed?); defects are attached to area {} "
-                "instead".format(ctx.mission_id, ctx.area_external_id)
+                "Mission {} has no campaign (first mapping, or the upload failed); defects are "
+                "attached to area {} instead".format(ctx.mission_id, ctx.area_external_id)
             )
         nodes = [
             self._node(ctx, campaign_external_id, cluster, external_id)

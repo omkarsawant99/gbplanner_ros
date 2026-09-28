@@ -195,6 +195,16 @@ These are the same conventions as `dss campaign upload`. If a file fails, the ca
 `InProgress`. Calling `~upload_mission` again resumes the same mission: same campaign, and files
 already uploaded are skipped. Nothing that already exists in CDF is changed or deleted.
 
+**First mapping (no plan yet).** A brand-new area has no Ready plan to follow. Set
+`~area_external_id` and explore anyway: at mission end the upload proceeds **without a
+campaign** — the mesh and `~mission_dir` files land as plain CogniteFiles tagged
+`area:<id>` and `mission:<id>` (no `plan:` tag), and `/autoassess/upload_status` says
+`campaignExternalId: null` with the note "no plan followed: uploaded without a campaign
+(first mapping)". The `dss worker` builds their 3D models as usual; group the files into a
+campaign in the viewer afterwards ("New campaign from files"). Findings from such a mission
+become defects attached to the **area** instead of a campaign. Without a configured
+`~area_external_id` (and no plan followed) the upload still fails with a clear message.
+
 Triggers:
 - `~upload_mission` (`std_srvs/Trigger`): upload now. The response names the campaign.
 - `~upload_on_mission_end: true` (default): automatically, once per mission. gbplanner has no

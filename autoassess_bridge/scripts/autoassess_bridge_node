@@ -128,8 +128,9 @@ class FindingsListener:
 class MissionUploads:
     """ROS wiring around MissionUploadRunner: status topic, Trigger service, auto trigger."""
 
-    def __init__(self, client, space, followed, findings_buffer):
+    def __init__(self, client, space, followed, findings_buffer, configured_area):
         self._followed = followed  # FollowedPlans: the plan (and area and map) followed when
+        self._configured_area = configured_area  # enables campaign-less first-mapping uploads
         self._last_failed = None
         self._last_ctx = None  # the last mission ctx, for ~submit_findings after a failure
         self._status_pub = rospy.Publisher("/autoassess/upload_status", String, queue_size=1, latch=True)
@@ -213,9 +214,17 @@ class MissionUploads:
         return TriggerResponse(success=ok, message=message)
 
     def _context(self, started_at):
-        """The mission is uploaded to the area of the plan followed when it started (None: none)."""
+        """The mission's context: the plan followed at its start, else (with a configured
+        ~area_external_id) a campaign-less first-mapping upload, else None."""
         followed = self._followed.at(started_at)
         if followed is None:
+            if self._configured_area:
+                return MissionContext(
+                    self._configured_area,
+                    mission_id_for(started_at),
+                    None,
+                    first_mapping=True,
+                )
             return None
         return MissionContext(
             followed.area_external_id,
@@ -321,7 +330,7 @@ def main():
     FindingsListener(findings_buffer, upload_enabled)
     uploads = None
     if upload_enabled:
-        uploads = MissionUploads(client, space, followed, findings_buffer)
+        uploads = MissionUploads(client, space, followed, findings_buffer, area)
 
     rate = rospy.Rate(1.0)
     next_poll = 0.0

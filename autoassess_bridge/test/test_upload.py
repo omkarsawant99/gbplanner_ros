@@ -234,6 +234,44 @@ def test_upload_content_goes_to_an_existing_node_without_reapplying_it(tmp_path:
     assert client.files.uploads == [(ply, (SPACE, xid))]
 
 
+def test_first_mapping_upload_creates_no_campaign() -> None:
+    client = FakeWriteClient()
+    ctx = MissionContext(AREA, CTX.mission_id, None, first_mapping=True)
+    ply = _touch_path()
+
+    result = _uploader(client).upload(ctx, [MissionFile(ply, "ply")])
+
+    campaign_nodes = [
+        n for n in client.instances.applied
+        if n["sources"][0]["source"]["externalId"] == "InspectionResultView"
+    ]
+    assert campaign_nodes == []
+    assert result.campaign_external_id is None
+    assert result.complete
+    xid = upload.file_external_id(AREA, ctx.mission_id, ply)
+    assert client.files.uploads == [(ply, (SPACE, xid))]
+    file_node = client.instances.applied[0]
+    assert file_node["sources"][0]["properties"]["tags"] == [
+        "autoassess", "ply_mesh", "area:" + AREA, "mission:" + ctx.mission_id
+    ]
+
+
+def test_first_mapping_partial_failure_still_writes_no_campaign() -> None:
+    client = FakeWriteClient()
+    ctx = MissionContext(AREA, CTX.mission_id, None, first_mapping=True)
+    ply = _touch_path()
+    client.files.fail_paths.add(ply)
+
+    result = _uploader(client).upload(ctx, [MissionFile(ply, "ply")])
+
+    assert not result.complete
+    assert result.campaign_external_id is None
+    assert [
+        n for n in client.instances.applied
+        if n["sources"][0]["source"]["externalId"] == "InspectionResultView"
+    ] == []
+
+
 def test_upload_without_files_writes_nothing() -> None:
     client = FakeWriteClient()
 
@@ -293,3 +331,11 @@ def _created_props() -> Dict[str, Any]:
         "pcdFileLabels": [],
         "createdBy": "autoassess_bridge",
     }
+
+
+def _touch_path() -> str:
+    import tempfile
+    handle = tempfile.NamedTemporaryFile(suffix=".ply", delete=False)
+    handle.write(b"x")
+    handle.close()
+    return handle.name
