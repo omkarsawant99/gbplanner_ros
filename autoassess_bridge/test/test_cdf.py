@@ -15,6 +15,9 @@ PLAN_VIEW = ("InspectionPlanView", "4")
 TASK_VIEW = ("InspectionTaskView", "1")
 ELEMENT_VIEW = ("StructuralElementView", "1")
 AREA_VIEW = ("AreaView", "4")
+VESSEL_VIEW = ("VesselView", "2")
+_READY = {"equals": {"property": [SPACE, "InspectionPlanContainer", "status"], "value": "Ready"}}
+_NOT_DELETED = {"not": {"exists": {"property": [SPACE, "InspectionPlanContainer", "deletedAt"]}}}
 FIXED_NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
@@ -63,27 +66,86 @@ def test_make_client_names_every_missing_variable() -> None:
     assert "COGNITE_CLUSTER" not in str(excinfo.value)
 
 
-def test_latest_ready_plan_filters_on_area_and_not_deleted() -> None:
+def test_latest_ready_plan_filters_on_ready_and_not_deleted_in_the_whole_project() -> None:
     client = FakeClient()
 
-    cdf.PlanSource(client).latest_ready_plan("area-1")
+    cdf.PlanSource(client).latest_ready_plan()
 
     (call,) = client.instances.calls_to("list")
     assert call["instance_type"] == "node"
     assert call["sources"][0].external_id == "InspectionPlanView"
     assert call["sources"][0].version == "4"
-    assert call["limit"] == 1000
+    assert call["limit"] is None
+    assert call["filter"] == {"and": [_READY, _NOT_DELETED]}
+
+
+def test_latest_ready_plan_can_filter_on_one_area() -> None:
+    client = FakeClient()
+
+    cdf.PlanSource(client).latest_ready_plan(area_external_id="area-1")
+
+    (call,) = client.instances.calls_to("list")
     assert call["filter"] == {
         "and": [
+            _READY,
+            _NOT_DELETED,
             {
                 "equals": {
                     "property": [SPACE, "InspectionPlanContainer", "area"],
                     "value": {"space": SPACE, "externalId": "area-1"},
                 }
             },
-            {"not": {"exists": {"property": [SPACE, "InspectionPlanContainer", "deletedAt"]}}},
         ]
     }
+
+
+def test_latest_ready_plan_can_filter_on_the_areas_of_a_vessel() -> None:
+    client = FakeClient()
+    client.instances.add(AREA_VIEW, FakeNode("area-1", AREA_VIEW, {"name": "Tank 1"}))
+    client.instances.add(AREA_VIEW, FakeNode("area-2", AREA_VIEW, {"name": "Tank 2"}))
+
+    cdf.PlanSource(client).latest_ready_plan(vessel_external_id="vessel-1")
+
+    area_call, plan_call = client.instances.calls_to("list")
+    assert area_call["sources"][0].external_id == "AreaView"
+    assert area_call["filter"] == {
+        "and": [
+            {
+                "equals": {
+                    "property": [SPACE, "AreaContainer", "vessel"],
+                    "value": {"space": SPACE, "externalId": "vessel-1"},
+                }
+            },
+            {"not": {"exists": {"property": [SPACE, "AreaContainer", "deletedAt"]}}},
+        ]
+    }
+    assert plan_call["filter"]["and"][2] == {
+        "in": {
+            "property": [SPACE, "InspectionPlanContainer", "area"],
+            "values": [
+                {"space": SPACE, "externalId": "area-1"},
+                {"space": SPACE, "externalId": "area-2"},
+            ],
+        }
+    }
+
+
+def test_latest_ready_plan_of_a_vessel_without_areas_is_none() -> None:
+    client = FakeClient()
+    client.instances.add(PLAN_VIEW, _plan_node("p-1"))
+
+    assert cdf.PlanSource(client).latest_ready_plan(vessel_external_id="vessel-1") is None
+    assert len(client.instances.calls_to("list")) == 1
+
+
+def test_latest_ready_plan_combines_vessel_and_area_filters() -> None:
+    client = FakeClient()
+    client.instances.add(AREA_VIEW, FakeNode("area-1", AREA_VIEW, {}))
+
+    cdf.PlanSource(client).latest_ready_plan(area_external_id="area-1", vessel_external_id="vessel-1")
+
+    plan_call = client.instances.calls_to("list")[-1]
+    assert [list(f)[0] for f in plan_call["filter"]["and"]] == ["equals", "not", "equals", "in"]
 
 
 def test_latest_ready_plan_returns_none_without_ready_plans() -> None:
@@ -91,7 +153,7 @@ def test_latest_ready_plan_returns_none_without_ready_plans() -> None:
     client.instances.add(PLAN_VIEW, _plan_node("p-draft", status="Draft"))
     client.instances.add(PLAN_VIEW, _plan_node("p-bad", status="Bogus"))
 
-    assert cdf.PlanSource(client).latest_ready_plan("area-1") is None
+    assert cdf.PlanSource(client).latest_ready_plan() is None
 
 
 def test_latest_ready_plan_picks_most_recently_updated_ready_plan() -> None:
@@ -101,7 +163,7 @@ def test_latest_ready_plan_picks_most_recently_updated_ready_plan() -> None:
     client.instances.add(PLAN_VIEW, _plan_node("p-mid", created=3, updated=20))
     client.instances.add(PLAN_VIEW, _plan_node("p-draft", status="Draft", created=4, updated=99))
 
-    plan = cdf.PlanSource(client).latest_ready_plan("area-1")
+    plan = cdf.PlanSource(client).latest_ready_plan()
 
     assert plan is not None
     assert plan.external_id == "p-new"
@@ -112,7 +174,7 @@ def test_latest_ready_plan_breaks_update_ties_by_creation_time() -> None:
     client.instances.add(PLAN_VIEW, _plan_node("p-a", created=5, updated=10))
     client.instances.add(PLAN_VIEW, _plan_node("p-b", created=7, updated=10))
 
-    plan = cdf.PlanSource(client).latest_ready_plan("area-1")
+    plan = cdf.PlanSource(client).latest_ready_plan()
 
     assert plan is not None
     assert plan.external_id == "p-b"
@@ -122,7 +184,7 @@ def test_latest_ready_plan_maps_plan_fields() -> None:
     client = FakeClient()
     client.instances.add(PLAN_VIEW, _plan_node("p-1", name="", description="desc", map_id=None))
 
-    plan = cdf.PlanSource(client).latest_ready_plan("area-1")
+    plan = cdf.PlanSource(client).latest_ready_plan()
 
     assert plan == cdf.Plan(
         space=SPACE,
@@ -279,6 +341,34 @@ def test_area_name_raises_for_unknown_area() -> None:
         cdf.PlanSource(FakeClient()).area_name("nope")
 
 
+def test_area_info_includes_the_vessel() -> None:
+    client = FakeClient()
+    client.instances.add(
+        AREA_VIEW,
+        FakeNode("area-1", AREA_VIEW, {"name": "Tank 1", "vessel": {"space": SPACE, "externalId": "v-1"}}),
+    )
+    client.instances.add(VESSEL_VIEW, FakeNode("v-1", VESSEL_VIEW, {"name": "Carrier"}))
+
+    info = cdf.PlanSource(client).area_info("area-1")
+
+    assert info == cdf.AreaInfo("area-1", "Tank 1", "v-1", "Carrier")
+    vessel_call = client.instances.calls_to("retrieve")[1]
+    assert vessel_call["sources"][0].external_id == "VesselView"
+    assert vessel_call["sources"][0].version == "2"
+
+
+def test_area_info_without_a_vessel() -> None:
+    client = FakeClient()
+    client.instances.add(AREA_VIEW, FakeNode("area-1", AREA_VIEW, {"name": "Tank 1"}))
+
+    assert cdf.PlanSource(client).area_info("area-1") == cdf.AreaInfo("area-1", "Tank 1", None, None)
+
+
+def test_area_info_raises_for_unknown_area() -> None:
+    with pytest.raises(LookupError):
+        cdf.PlanSource(FakeClient()).area_info("nope")
+
+
 def test_element_centres_lists_elements_of_the_area() -> None:
     client = FakeClient()
     client.instances.add(ELEMENT_VIEW, _element_node("e-1", "wall", (1, 2, 3)))
@@ -308,12 +398,12 @@ def test_element_centres_skips_elements_without_a_full_centre() -> None:
 def test_plan_source_uses_configured_space() -> None:
     client = FakeClient()
 
-    cdf.PlanSource(client, space="other").latest_ready_plan("area-1")
+    cdf.PlanSource(client, space="other").latest_ready_plan(area_external_id="area-1")
 
     (call,) = client.instances.calls_to("list")
     assert call["sources"][0].space == "other"
-    assert call["filter"]["and"][0]["equals"]["property"][0] == "other"
-    assert call["filter"]["and"][0]["equals"]["value"]["space"] == "other"
+    assert call["filter"]["and"][2]["equals"]["property"][0] == "other"
+    assert call["filter"]["and"][2]["equals"]["value"]["space"] == "other"
 
 
 # ---------------------------------------------------------------------------

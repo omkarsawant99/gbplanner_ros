@@ -2,14 +2,18 @@
 <!-- SPDX-License-Identifier: BSD-3-Clause -->
 <!-- CDF credentials are read from the COGNITE_* environment variables of this launch. -->
 <launch>
-  <arg name="area_external_id" />
+  <!-- Optional filters. Both empty (default): follow the newest Ready plan of the whole project.
+       When set, they override the values in the config file. -->
+  <arg name="area_external_id" default="" />
+  <arg name="vessel_external_id" default="" />
   <arg name="config" default="$(find autoassess_bridge)/config/autoassess_bridge.yaml" />
   <!-- nav_msgs/Odometry of the robot; only used by the mission-end detection of uploads. -->
   <arg name="odometry_topic" default="odometry" />
 
   <node pkg="autoassess_bridge" type="autoassess_bridge_node" name="autoassess_bridge" output="screen">
     <rosparam command="load" file="$(arg config)" />
-    <param name="area_external_id" value="$(arg area_external_id)" />
+    <param if="$(eval area_external_id != '')" name="area_external_id" value="$(arg area_external_id)" />
+    <param if="$(eval vessel_external_id != '')" name="vessel_external_id" value="$(arg vessel_external_id)" />
     <remap from="odometry" to="$(arg odometry_topic)" />
   </node>
 </launch>

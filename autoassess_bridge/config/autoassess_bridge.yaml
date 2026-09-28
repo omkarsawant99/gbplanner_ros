@@ -2,7 +2,11 @@
 # Parameters of autoassess_bridge_node (private namespace). CDF credentials are NOT set here:
 # export COGNITE_PROJECT, COGNITE_CLUSTER, COGNITE_TENANT_ID, COGNITE_CLIENT_ID and
 # COGNITE_CLIENT_SECRET in the environment that starts the node.
-area_external_id: ""            # required: externalId of the AutoAssess area to follow
+# Which plan to follow: the newest Ready (non-deleted) plan. Both filters empty = the whole
+# project, so marking any plan Ready in AutoAssess switches the robot to it. The chosen plan's
+# area drives the global bound, the reference map and the upload area.
+vessel_external_id: ""          # optional: only plans in this vessel's areas
+area_external_id: ""            # optional: only plans in this area
 space: autoassess               # CDF data-model space of the AutoAssess instances
 poll_period_s: 10.0             # how often to poll CDF
 frame_id: world                 # frame of /autoassess/inspection_targets (plan map frame)

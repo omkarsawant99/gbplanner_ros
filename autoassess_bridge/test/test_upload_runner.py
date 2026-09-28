@@ -11,7 +11,13 @@ import pytest
 from conftest import RecordingLog
 
 from autoassess_bridge import upload
-from autoassess_bridge.upload import MissionContext, MissionFile, MissionUploadRunner, UploadResult
+from autoassess_bridge.upload import (
+    FollowedPlans,
+    MissionContext,
+    MissionFile,
+    MissionUploadRunner,
+    UploadResult,
+)
 
 CTX = MissionContext("area-1", "mission-20260101T000000Z", "plan-1")
 
@@ -185,6 +191,62 @@ def test_run_refuses_a_second_upload_while_one_is_running(tmp_path: Any) -> None
 
     assert not ok
     assert "already running" in message
+
+
+def test_run_without_a_followed_plan_fails_without_writing() -> None:
+    uploader = _FakeUploader()
+    statuses: List[Dict[str, Any]] = []
+    exported: List[str] = []
+
+    ok, message = _runner(uploader, statuses, export=lambda: exported.append("x") or "m").run(None)
+
+    assert not ok
+    assert "No plan has been followed" in message
+    assert uploader.calls == []
+    assert exported == []
+    assert statuses[-1]["state"] == "failed"
+
+
+# --- FollowedPlans --------------------------------------------------------------------------
+
+
+def test_followed_plans_gives_the_plan_active_at_the_mission_start() -> None:
+    plans = FollowedPlans()
+    plans.record(10.0, "p-1", "area-1")
+    plans.record(50.0, "p-2", "area-2")
+
+    assert plans.at(30.0) == ("p-1", "area-1")
+    assert plans.at(50.0) == ("p-2", "area-2")
+    assert plans.at(99.0) == ("p-2", "area-2")
+
+
+def test_followed_plans_uses_the_first_plan_for_a_mission_started_before_it() -> None:
+    plans = FollowedPlans()
+    plans.record(10.0, "p-1", "area-1")
+
+    assert plans.at(5.0) == ("p-1", "area-1")
+
+
+def test_followed_plans_is_empty_until_a_plan_is_followed() -> None:
+    assert FollowedPlans().at(5.0) is None
+    assert FollowedPlans().latest() is None
+
+
+def test_followed_plans_latest() -> None:
+    plans = FollowedPlans()
+    plans.record(10.0, "p-1", "area-1")
+    plans.record(20.0, "p-2", "area-2")
+
+    assert plans.latest() == ("p-2", "area-2")
+
+
+def test_followed_plans_ignores_a_repeat_of_the_current_plan() -> None:
+    plans = FollowedPlans()
+    plans.record(10.0, "p-1", "area-1")
+    plans.record(20.0, "p-1", "area-1")
+
+    assert plans.at(15.0) == ("p-1", "area-1")
+    assert len(plans) == 1
 
 
 def test_idle_status_has_no_mission() -> None:

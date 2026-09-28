@@ -3,7 +3,7 @@
 A small ROS 1 (Noetic) node that connects gbplanner to AutoAssess, which stores its data in
 Cognite Data Fusion (CDF). It does three things:
 
-1. It polls the area's newest **Ready** inspection plan and publishes it: the plan JSON,
+1. It follows the newest **Ready** inspection plan in the CDF project and publishes it: the plan JSON,
    inspection target poses, and the plan id. It can also set gbplanner's global bound.
 2. It publishes the plan's **reference map** as a latched point cloud on
    `/ballast_tank/pointcloud`. You no longer need to download the map and run `pcd_to_pointcloud`.
@@ -25,9 +25,16 @@ catkin build autoassess_bridge            # or catkin_make; needs planner_msgs
 export COGNITE_PROJECT=... COGNITE_CLUSTER=... COGNITE_TENANT_ID=... COGNITE_CLIENT_ID=... COGNITE_CLIENT_SECRET=...
 
 # 3. Start the bridge next to gbplanner
-roslaunch autoassess_bridge autoassess_bridge.launch area_external_id:=area-XXXX \
-    odometry_topic:=<your nav_msgs/Odometry topic>
+roslaunch autoassess_bridge autoassess_bridge.launch
+# with automatic mission upload (below), also pass your odometry:
+#   roslaunch autoassess_bridge autoassess_bridge.launch odometry_topic:=<your nav_msgs/Odometry topic>
 ```
+
+- **Which plan.** No area id is needed. The bridge follows the newest Ready plan of the whole
+  project, and that plan's area drives the global bound, the reference map and the upload area.
+  Marking any plan Ready in AutoAssess switches the robot to it. To stay on one vessel or one
+  area, pass `vessel_external_id:=vessel-…` and/or `area_external_id:=area-…` to the launch file
+  (or set them in the yaml).
 
 - **gbplanner's reference map.** Keep `/ballast_tank/pointcloud` as the map topic in the
   gbplanner launch file. The bridge publishes the plan's map there, latched, in frame `world`,
@@ -56,9 +63,12 @@ rostopic echo -n1 /ballast_tank/pointcloud --noarr      # the reference map (fra
 
 ## Plan topics
 
-Every `~poll_period_s` the node looks up the newest non-deleted plan with status `Ready` for the
-configured area. When that plan's content changes (a different plan, or edited tasks), it
-publishes:
+Every `~poll_period_s` the node looks up the newest non-deleted plan with status `Ready`
+(newest by last update, then creation time). It searches the whole project, or only
+`~vessel_external_id`'s areas and/or `~area_external_id` when set. The plan's area is taken from
+the plan (`areaExternalId` / `areaName` in the plan JSON). Each switch is logged as
+"Following plan <id> '<name>' in <vessel>/<area>". When that plan's content changes (a different
+plan, possibly in another area, or edited tasks), it publishes:
 
 | Topic | Type | Content |
 | --- | --- | --- |
@@ -68,7 +78,8 @@ publishes:
 
 All three are latched, so late subscribers get the current plan. Tasks without a target point are
 left out of the PoseArray (and logged); the full list stays in `/autoassess/plan`. If there is no
-Ready plan, the node logs "No Ready plan" once and waits.
+Ready plan, the node logs "No Ready plan (filter: …)" once and waits. When the newest Ready
+plan moves to another area, the plan, targets and map are republished and the bound is resent.
 
 **Inspection poses.**
 - Region tasks: `standoff_m` out from `position3d`, along `normalVector`.
@@ -108,7 +119,9 @@ goes out as a latched `sensor_msgs/PointCloud2` on `~map_topic` (default
 ## Mission upload
 
 Off unless `~upload_enabled: true`. An upload sends the mission's output to CDF, where the
-AutoAssess viewer shows it as a new campaign of the area. The node does not build the 3D model.
+AutoAssess viewer shows it as a new campaign. The campaign and file tags use the area of the plan
+the bridge was following when the mission started. If the bridge has not followed any plan yet,
+the upload fails with a clear message; it never creates areas. The node does not build the 3D model.
 That is done afterwards by the AutoAssess `dss worker`, which is being added to the AutoAssess
 SDK (upcoming, not released yet).
 
@@ -154,7 +167,7 @@ All parameters are private (`~`), with defaults in
 
 | Group | Parameters |
 | --- | --- |
-| Plan | `area_external_id` (required), `space`, `poll_period_s`, `frame_id`, `standoff_m` |
+| Plan | `vessel_external_id`, `area_external_id` (optional filters), `space`, `poll_period_s`, `frame_id`, `standoff_m` |
 | Reference map | `publish_map`, `map_topic`, `map_frame_id`, `map_file_label`, `map_cache_dir` |
 | Global bound | `set_global_bound`, `bound_margin_m`, `global_bound_service`, `service_timeout_s` |
 | Mission upload | `upload_enabled`, `upload_on_mission_end`, `mesh_filename`, `generate_mesh_service`, `mesh_timeout_s`, `mission_dir`, `mission_end_quiet_s`, `mission_end_max_speed`, `path_topic`, `homing_topic` |
@@ -176,12 +189,12 @@ ROS parameters or files: `COGNITE_PROJECT`, `COGNITE_CLUSTER`, `COGNITE_TENANT_I
 ```bash
 cp autoassess_bridge/.env.example autoassess_bridge/.env   # once; edit the values
 set -a; source autoassess_bridge/.env; set +a
-roslaunch autoassess_bridge autoassess_bridge.launch area_external_id:=area-XXXX
+roslaunch autoassess_bridge autoassess_bridge.launch
 ```
 
 With Docker, pass it with `docker run --env-file autoassess_bridge/.env …`. Never commit `.env`.
 
-A missing variable or a missing `area_external_id` stops the node with a clear message.
+A missing variable stops the node with a clear message.
 
 ## Tests
 

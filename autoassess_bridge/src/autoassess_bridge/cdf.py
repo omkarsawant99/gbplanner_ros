@@ -24,10 +24,12 @@ from autoassess_bridge.plan import Vec3
 SPACE = "autoassess"
 
 # Views as (externalId, version) and containers (for filter paths) of the AutoAssess data model.
+VESSEL_VIEW = ("VesselView", "2")
 AREA_VIEW = ("AreaView", "4")
 INSPECTION_PLAN_VIEW = ("InspectionPlanView", "4")
 INSPECTION_TASK_VIEW = ("InspectionTaskView", "1")
 STRUCTURAL_ELEMENT_VIEW = ("StructuralElementView", "1")
+AREA_CONTAINER = "AreaContainer"
 INSPECTION_PLAN_CONTAINER = "InspectionPlanContainer"
 INSPECTION_TASK_CONTAINER = "InspectionTaskContainer"
 STRUCTURAL_ELEMENT_CONTAINER = "StructuralElementContainer"
@@ -100,6 +102,14 @@ class Plan:
     last_updated_time: int
 
 
+@dataclass(frozen=True)
+class AreaInfo:
+    external_id: str
+    name: str
+    vessel_external_id: Optional[str]
+    vessel_name: Optional[str]
+
+
 class PlanSource:
     """Reads plans, tasks, and area data for one AutoAssess space."""
 
@@ -113,35 +123,64 @@ class PlanSource:
         self._space = space
         self._now = now
 
-    def latest_ready_plan(self, area_external_id: str) -> Optional[Plan]:
-        """The most recently updated non-deleted plan with status Ready, if any."""
+    def latest_ready_plan(
+        self,
+        area_external_id: Optional[str] = None,
+        vessel_external_id: Optional[str] = None,
+    ) -> Optional[Plan]:
+        """The most recently updated non-deleted Ready plan in the project, if any.
+
+        Optionally only plans of one area and/or of the areas of one vessel.
+        """
+        plan_prop = lambda name: self._prop(INSPECTION_PLAN_CONTAINER, name)  # noqa: E731
+        filters: List[Dict[str, Any]] = [
+            {"equals": {"property": plan_prop("status"), "value": "Ready"}},
+            {"not": {"exists": {"property": plan_prop("deletedAt")}}},
+        ]
+        if area_external_id:
+            filters.append({"equals": {"property": plan_prop("area"), "value": self._ref(area_external_id)}})
+        if vessel_external_id:
+            areas = self._vessel_areas(vessel_external_id)
+            if not areas:
+                return None
+            filters.append(
+                {"in": {"property": plan_prop("area"), "values": [self._ref(a) for a in areas]}}
+            )
         items = self._instances.list(
             instance_type="node",
             sources=[self._view(INSPECTION_PLAN_VIEW)],
-            filter={
-                "and": [
-                    {
-                        "equals": {
-                            "property": self._prop(INSPECTION_PLAN_CONTAINER, "area"),
-                            "value": self._ref(area_external_id),
-                        }
-                    },
-                    {
-                        "not": {
-                            "exists": {
-                                "property": self._prop(INSPECTION_PLAN_CONTAINER, "deletedAt")
-                            }
-                        }
-                    },
-                ]
-            },
-            limit=1000,
+            filter={"and": filters},
+            limit=None,
         )
         plans = [self._map_plan(item) for item in items if item.instance_type == "node"]
         ready = [p for p in plans if p.status == "Ready"]
         if not ready:
             return None
         return max(ready, key=lambda p: (p.last_updated_time, p.created_time))
+
+    def area_info(self, area_external_id: str) -> AreaInfo:
+        """The area's name and its vessel (externalId and name, None if not set)."""
+        result = self._instances.retrieve(
+            nodes=[(self._space, area_external_id)], sources=[self._view(AREA_VIEW)]
+        )
+        if not result.nodes:
+            raise LookupError("Area '{}' not found in space '{}'".format(area_external_id, self._space))
+        props = self._props(result.nodes[0], AREA_VIEW)
+        vessel_ref = props.get("vessel") or {}
+        vessel_id = vessel_ref.get("externalId") if isinstance(vessel_ref, dict) else None
+        vessel_name: Optional[str] = None
+        if vessel_id:
+            vessels = self._instances.retrieve(
+                nodes=[(self._space, str(vessel_id))], sources=[self._view(VESSEL_VIEW)]
+            )
+            if vessels.nodes:
+                vessel_name = str(self._props(vessels.nodes[0], VESSEL_VIEW).get("name", "")) or None
+        return AreaInfo(
+            area_external_id,
+            str(props.get("name", "")),
+            str(vessel_id) if vessel_id else None,
+            vessel_name,
+        )
 
     def plan_json(self, plan: Plan, area_name: str) -> Dict[str, Any]:
         """The plan and its tasks as the plan.json dict written by `dss plan download`."""
@@ -205,6 +244,25 @@ class PlanSource:
         return centres
 
     # -- helpers -----------------------------------------------------------------------------
+
+    def _vessel_areas(self, vessel_external_id: str) -> List[str]:
+        items = self._instances.list(
+            instance_type="node",
+            sources=[self._view(AREA_VIEW)],
+            filter={
+                "and": [
+                    {
+                        "equals": {
+                            "property": self._prop(AREA_CONTAINER, "vessel"),
+                            "value": self._ref(vessel_external_id),
+                        }
+                    },
+                    {"not": {"exists": {"property": self._prop(AREA_CONTAINER, "deletedAt")}}},
+                ]
+            },
+            limit=None,
+        )
+        return [item.external_id for item in items if item.instance_type == "node"]
 
     def _element_targets(
         self, task_props: List[Tuple[str, Dict[str, Any]]]

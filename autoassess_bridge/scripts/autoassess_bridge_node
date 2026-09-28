@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
-"""Poll the area's Ready AutoAssess plan from CDF and publish it (latched) for the autonomy stack.
+"""Follow the newest Ready AutoAssess plan in CDF and publish it (latched) for the autonomy stack.
+
+Without ~vessel_external_id / ~area_external_id it follows the newest Ready plan of the whole
+project; the plan's area then drives everything else (global bound, map, upload area).
 
 Publishes /autoassess/plan (std_msgs/String, plan.json text as written by `dss plan download`),
 /autoassess/inspection_targets (geometry_msgs/PoseArray, one inspection pose per task) and
@@ -40,6 +43,7 @@ from autoassess_bridge.plan import area_bounds, plan_to_poses
 from autoassess_bridge.poller import PlanPoller
 from autoassess_bridge.upload import (
     MissionContext,
+    FollowedPlans,
     MissionUploader,
     MissionUploadRunner,
     export_mesh,
@@ -91,9 +95,8 @@ def make_mesh_export(service_name, mesh_filename, service_timeout_s, mesh_timeou
 class MissionUploads:
     """ROS wiring around MissionUploadRunner: status topic, Trigger service, auto trigger."""
 
-    def __init__(self, client, space, area, current_plan_id):
-        self._area = area
-        self._current_plan_id = current_plan_id
+    def __init__(self, client, space, followed):
+        self._followed = followed  # FollowedPlans: the plan (and area) followed when
         self._last_failed = None
         self._status_pub = rospy.Publisher("/autoassess/upload_status", String, queue_size=1, latch=True)
         mesh_filename = rospy.get_param("~mesh_filename", "")
@@ -159,7 +162,12 @@ class MissionUploads:
         return TriggerResponse(success=ok, message=message)
 
     def _context(self, started_at):
-        return MissionContext(self._area, mission_id_for(started_at), self._current_plan_id())
+        """The mission is uploaded to the area of the plan followed when it started (None: none)."""
+        followed = self._followed.at(started_at)
+        if followed is None:
+            return None
+        plan_id, area_id = followed
+        return MissionContext(area_id, mission_id_for(started_at), plan_id)
 
     def _publish(self, status):
         self._status_pub.publish(String(data=json.dumps(status)))
@@ -209,10 +217,8 @@ def to_pose_array(poses, frame_id):
 
 def main():
     rospy.init_node("autoassess_bridge")
-    area = rospy.get_param("~area_external_id", "")
-    if not area:
-        rospy.logfatal("Parameter ~area_external_id is required")
-        return 1
+    area = rospy.get_param("~area_external_id", "") or None
+    vessel = rospy.get_param("~vessel_external_id", "") or None
     period_s = float(rospy.get_param("~poll_period_s", 10.0))
     frame_id = rospy.get_param("~frame_id", "world")
     standoff_m = float(rospy.get_param("~standoff_m", 0.8))
@@ -229,12 +235,17 @@ def main():
         return 1
 
     log = RosLog()
-    poller = PlanPoller(cdf.PlanSource(client, space=space), area, log)
+    poller = PlanPoller(
+        cdf.PlanSource(client, space=space), log, area_external_id=area, vessel_external_id=vessel
+    )
     bound = GlobalBoundSetter(make_bound_call(service_name, timeout_s), log) if set_bound else None
     plan_pub = rospy.Publisher("/autoassess/plan", String, queue_size=1, latch=True)
     targets_pub = rospy.Publisher("/autoassess/inspection_targets", PoseArray, queue_size=1, latch=True)
     plan_id_pub = rospy.Publisher("/autoassess/plan_id", String, queue_size=1, latch=True)
-    rospy.loginfo("Polling AutoAssess plans for area %s every %.1f s", area, period_s)
+    rospy.loginfo(
+        "Following the newest Ready AutoAssess plan (filter: %s), polling every %.1f s",
+        poller.filter_description, period_s,
+    )
 
     maps = None
     if bool(rospy.get_param("~publish_map", True)):
@@ -248,10 +259,10 @@ def main():
         )
         rospy.loginfo("Publishing the plan's reference map on %s", map_topic)
 
-    current = {"plan_id": None}
+    followed = FollowedPlans()
     uploads = None
     if bool(rospy.get_param("~upload_enabled", False)):
-        uploads = MissionUploads(client, space, area, lambda: current["plan_id"])
+        uploads = MissionUploads(client, space, followed)
 
     rate = rospy.Rate(1.0)
     next_poll = 0.0
@@ -269,7 +280,7 @@ def main():
         next_poll = time.time() + period_s
         update = poller.poll()
         if update is not None:
-            current["plan_id"] = update.plan["planExternalId"]
+            followed.record(time.time(), update.plan["planExternalId"], update.area.external_id)
             poses, skipped = plan_to_poses(update.plan, standoff_m)
             plan_pub.publish(String(data=cdf.dumps_plan(update.plan)))
             targets_pub.publish(to_pose_array(poses, frame_id))
@@ -281,7 +292,8 @@ def main():
             if skipped:
                 rospy.logwarn("Tasks without a target (no pose published): %s", ", ".join(skipped))
             if maps is not None:
-                maps.want(update.plan.get("mapExternalId"))  # loads in the background
+                maps.want(update.plan.get("mapExternalId"))
+                maps.tick(time.time())  # start the background load before the bound call waits
             if bound is not None:
                 box = area_bounds(update.element_centres, margin_m)
                 if box is None:

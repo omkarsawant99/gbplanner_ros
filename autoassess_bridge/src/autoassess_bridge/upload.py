@@ -312,6 +312,48 @@ def status_message(
     }
 
 
+class FollowedPlans:
+    """Which plan (and so which area) the bridge followed when; thread-safe.
+
+    at(t) is the plan followed at time t: the last one recorded at or before t, or the first one
+    if the bridge only picked up a plan after t (it was started mid-mission).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._records: List[Tuple[float, str, str]] = []
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._records)
+
+    def record(self, now: float, plan_external_id: str, area_external_id: str) -> None:
+        with self._lock:
+            if self._records and self._records[-1][1:] == (plan_external_id, area_external_id):
+                return
+            self._records.append((now, plan_external_id, area_external_id))
+
+    def at(self, when: float) -> Optional[Tuple[str, str]]:
+        with self._lock:
+            if not self._records:
+                return None
+            chosen = self._records[0]
+            for record in self._records:
+                if record[0] <= when:
+                    chosen = record
+            return chosen[1], chosen[2]
+
+    def latest(self) -> Optional[Tuple[str, str]]:
+        with self._lock:
+            return self._records[-1][1:] if self._records else None
+
+
+NO_PLAN_MESSAGE = (
+    "No plan has been followed yet, so the mission has no area to upload to; "
+    "mark a plan Ready in AutoAssess and let the bridge pick it up first"
+)
+
+
 class MissionUploadRunner:
     """One upload at a time: export the mesh (optional), collect files, upload, report status.
 
@@ -334,10 +376,13 @@ class MissionUploadRunner:
         self._log = log
         self._lock = threading.Lock()
 
-    def run(self, ctx: MissionContext) -> Tuple[bool, str]:
+    def run(self, ctx: Optional[MissionContext]) -> Tuple[bool, str]:
+        """Upload; `ctx` None means no plan (so no area) is known, which fails without writes."""
         if not self._lock.acquire(False):
             return False, "An upload is already running"
         try:
+            if ctx is None:
+                return self._fail(None, NO_PLAN_MESSAGE)
             return self._run(ctx)
         finally:
             self._lock.release()
@@ -371,7 +416,7 @@ class MissionUploadRunner:
         self._publish(status_message("failed", ctx, result, message, skipped))
         return False, message
 
-    def _fail(self, ctx: MissionContext, message: str, skipped: Sequence[str] = ()) -> Tuple[bool, str]:
+    def _fail(self, ctx: Optional[MissionContext], message: str, skipped: Sequence[str] = ()) -> Tuple[bool, str]:
         self._log.error(message)
         self._publish(status_message("failed", ctx, message=message, skipped=skipped))
         return False, message
