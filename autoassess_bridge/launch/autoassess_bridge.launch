@@ -4,9 +4,12 @@
 <launch>
   <arg name="area_external_id" />
   <arg name="config" default="$(find autoassess_bridge)/config/autoassess_bridge.yaml" />
+  <!-- nav_msgs/Odometry of the robot; only used by the mission-end detection of uploads. -->
+  <arg name="odometry_topic" default="odometry" />
 
   <node pkg="autoassess_bridge" type="autoassess_bridge_node" name="autoassess_bridge" output="screen">
     <rosparam command="load" file="$(arg config)" />
     <param name="area_external_id" value="$(arg area_external_id)" />
+    <remap from="odometry" to="$(arg odometry_topic)" />
   </node>
 </launch>

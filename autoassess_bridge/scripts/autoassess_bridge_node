@@ -5,22 +5,42 @@
 Publishes /autoassess/plan (std_msgs/String, plan.json text as written by `dss plan download`),
 /autoassess/inspection_targets (geometry_msgs/PoseArray, one inspection pose per task) and
 /autoassess/plan_id (std_msgs/String). Optionally sends the area box to gbplanner's
-set_global_bound service. Read-only towards CDF; credentials come from COGNITE_* env variables.
+set_global_bound service. Credentials come from COGNITE_* env variables.
+
+With ~upload_enabled (default false) it also uploads a finished mission to CDF (the only
+writes this node makes): the gbplanner mesh plus the ~mission_dir files as CogniteFiles, and an
+AutoAssess campaign that lists them. An upload runs on the ~upload_mission service
+(std_srvs/Trigger) and, with ~upload_on_mission_end, when the mission looks finished
+(homing, no new path for ~mission_end_quiet_s, robot still). Progress: /autoassess/upload_status.
 """
 
+import json
 import os
 import sys
+import threading
+import time
 
 import rospy
 from geometry_msgs.msg import Point, Pose, PoseArray, Quaternion
+from nav_msgs.msg import Odometry, Path
 from planner_msgs.msg import PlanningBound
 from planner_msgs.srv import planner_set_global_bound, planner_set_global_boundRequest
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
+from std_srvs.srv import Empty, Trigger, TriggerResponse
 
 from autoassess_bridge import cdf
 from autoassess_bridge.bound import GlobalBoundSetter, ServiceUnavailable
+from autoassess_bridge.mission_end import MissionEndDetector
 from autoassess_bridge.plan import area_bounds, plan_to_poses
 from autoassess_bridge.poller import PlanPoller
+from autoassess_bridge.upload import (
+    MissionContext,
+    MissionUploader,
+    MissionUploadRunner,
+    export_mesh,
+    mission_id_for,
+    status_message,
+)
 
 
 class RosLog:
@@ -50,6 +70,105 @@ def make_bound_call(service_name, timeout_s):
         return bool(res.success), detail
 
     return call
+
+
+def make_mesh_export(service_name, mesh_filename, service_timeout_s, mesh_timeout_s):
+    """export_mesh() for the runner: call voxblox's generate_mesh, wait for the PLY file."""
+    proxy = rospy.ServiceProxy(service_name, Empty)
+
+    def generate():
+        rospy.wait_for_service(service_name, timeout=service_timeout_s)
+        proxy()
+
+    return lambda: export_mesh(generate, mesh_filename, mesh_timeout_s)
+
+
+class MissionUploads:
+    """ROS wiring around MissionUploadRunner: status topic, Trigger service, auto trigger."""
+
+    def __init__(self, client, space, area, current_plan_id):
+        self._area = area
+        self._current_plan_id = current_plan_id
+        self._last_failed = None
+        self._status_pub = rospy.Publisher("/autoassess/upload_status", String, queue_size=1, latch=True)
+        mesh_filename = rospy.get_param("~mesh_filename", "")
+        mission_dir = rospy.get_param("~mission_dir", "") or None
+        exporter = None
+        if mesh_filename:
+            exporter = make_mesh_export(
+                rospy.get_param("~generate_mesh_service", "/gbplanner_node/generate_mesh"),
+                mesh_filename,
+                float(rospy.get_param("~service_timeout_s", 5.0)),
+                float(rospy.get_param("~mesh_timeout_s", 30.0)),
+            )
+        else:
+            rospy.logwarn("~mesh_filename is empty: uploads contain only the ~mission_dir files")
+        self._runner = MissionUploadRunner(
+            MissionUploader(client, RosLog(), space=space),
+            export_mesh=exporter,
+            mission_dir=mission_dir,
+            publish_status=self._publish,
+            log=RosLog(),
+        )
+        self._detector = None
+        if bool(rospy.get_param("~upload_on_mission_end", True)):
+            self._detector = MissionEndDetector(
+                quiet_s=float(rospy.get_param("~mission_end_quiet_s", 10.0)),
+                max_speed=float(rospy.get_param("~mission_end_max_speed", 0.1)),
+            )
+            rospy.Subscriber(rospy.get_param("~path_topic", "/gbplanner_path"), Path, self._on_path)
+            rospy.Subscriber(rospy.get_param("~homing_topic", "/gbplanner_is_homing"), Bool, self._on_homing)
+            rospy.Subscriber("odometry", Odometry, self._on_odometry)
+        rospy.Service("~upload_mission", Trigger, self._on_trigger)
+        self._publish(status_message("idle", None))
+        rospy.loginfo(
+            "Mission upload enabled (%s)",
+            "on mission end and ~upload_mission" if self._detector else "on ~upload_mission only",
+        )
+
+    def tick(self):
+        if self._detector is None:
+            return
+        started_at = self._detector.check(time.time())
+        if started_at is not None:
+            rospy.loginfo("Mission looks finished (homing, no new path, robot still): uploading")
+            ctx = self._context(started_at)
+            threading.Thread(target=self._run, args=(ctx,), daemon=True).start()
+
+    def _run(self, ctx):
+        ok, _message = self._runner.run(ctx)
+        self._last_failed = None if ok else ctx
+        return ok, _message
+
+    def _on_trigger(self, _req):
+        started_at = self._detector.mission_started_at if self._detector else None
+        if started_at is not None:
+            ctx = self._context(started_at)
+        elif self._last_failed is not None:
+            ctx = self._last_failed  # resume: same mission id, same campaign, skip uploaded files
+        else:
+            ctx = self._context(time.time())
+        ok, message = self._run(ctx)
+        if ok and self._detector is not None:
+            self._detector.reset()
+        return TriggerResponse(success=ok, message=message)
+
+    def _context(self, started_at):
+        return MissionContext(self._area, mission_id_for(started_at), self._current_plan_id())
+
+    def _publish(self, status):
+        self._status_pub.publish(String(data=json.dumps(status)))
+
+    def _on_path(self, msg):
+        if msg.poses:
+            self._detector.on_path(time.time())
+
+    def _on_homing(self, msg):
+        self._detector.on_homing(msg.data, time.time())
+
+    def _on_odometry(self, msg):
+        v = msg.twist.twist.linear
+        self._detector.on_speed((v.x * v.x + v.y * v.y + v.z * v.z) ** 0.5, time.time())
 
 
 def to_pose_array(poses, frame_id):
@@ -89,10 +208,26 @@ def main():
     plan_id_pub = rospy.Publisher("/autoassess/plan_id", String, queue_size=1, latch=True)
     rospy.loginfo("Polling AutoAssess plans for area %s every %.1f s", area, period_s)
 
-    rate = rospy.Rate(1.0 / period_s)
+    current = {"plan_id": None}
+    uploads = None
+    if bool(rospy.get_param("~upload_enabled", False)):
+        uploads = MissionUploads(client, space, area, lambda: current["plan_id"])
+
+    rate = rospy.Rate(1.0)
+    next_poll = 0.0
     while not rospy.is_shutdown():
+        if uploads is not None:
+            uploads.tick()
+        if time.time() < next_poll:
+            try:
+                rate.sleep()
+            except rospy.ROSInterruptException:
+                break
+            continue
+        next_poll = time.time() + period_s
         update = poller.poll()
         if update is not None:
+            current["plan_id"] = update.plan["planExternalId"]
             poses, skipped = plan_to_poses(update.plan, standoff_m)
             plan_pub.publish(String(data=cdf.dumps_plan(update.plan)))
             targets_pub.publish(to_pose_array(poses, frame_id))

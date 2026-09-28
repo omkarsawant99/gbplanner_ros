@@ -3,8 +3,9 @@
   <name>autoassess_bridge</name>
   <version>0.1.0</version>
   <description>
-    Polls AutoAssess inspection plans from Cognite Data Fusion (read-only) and publishes them
-    (plan JSON, inspection target poses, optional global planning bound) to the autonomy stack.
+    Polls AutoAssess inspection plans from Cognite Data Fusion and publishes them (plan JSON,
+    inspection target poses, optional global planning bound) to the autonomy stack. Optionally
+    uploads the finished mission (mesh, point clouds) to CDF as an AutoAssess campaign.
   </description>
 
   <maintainer email="eliasbjorne@gmail.com">Elias Bjorne</maintainer>
@@ -16,6 +17,8 @@
   <exec_depend>rospy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
   <exec_depend>planner_msgs</exec_depend>
   <!-- cognite-sdk is not in rosdep: install it with pip3 install -r requirements.txt -->
 

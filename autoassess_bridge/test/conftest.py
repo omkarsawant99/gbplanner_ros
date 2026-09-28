@@ -93,3 +93,62 @@ class RecordingLog:
 
     def messages(self, level: str) -> List[str]:
         return [m for lvl, m in self.records if lvl == level]
+
+
+class FakeFiles:
+    """files.retrieve / files.upload_content over an in-memory store keyed by instance id.
+
+    A CogniteFile node applied through FakeWriteInstances becomes retrievable with
+    uploaded=False; upload_content marks it uploaded. Paths in `fail_paths` raise.
+    """
+
+    def __init__(self) -> None:
+        self.store: Dict[Tuple[str, str], SimpleNamespace] = {}
+        self.uploads: List[Tuple[str, Tuple[str, str]]] = []
+        self.fail_paths: set = set()
+        self._next_id = 1000
+
+    def register(self, space: str, external_id: str, uploaded: bool) -> SimpleNamespace:
+        self._next_id += 1
+        meta = SimpleNamespace(id=self._next_id, uploaded=uploaded)
+        self.store[(space, external_id)] = meta
+        return meta
+
+    def retrieve(self, id: Any = None, external_id: Any = None, instance_id: Any = None) -> Any:
+        return self.store.get((instance_id.space, instance_id.external_id))
+
+    def upload_content(self, path: str, external_id: Any = None, instance_id: Any = None) -> Any:
+        key = (instance_id.space, instance_id.external_id)
+        if path in self.fail_paths:
+            raise RuntimeError("upload of {} failed".format(path))
+        if key not in self.store:
+            raise RuntimeError("no CogniteFile node {}".format(key))
+        self.uploads.append((path, key))
+        meta = self.store[key]
+        meta.uploaded = True
+        return SimpleNamespace(id=meta.id)
+
+
+class FakeWriteInstances(FakeInstances):
+    """FakeInstances plus apply(); applied CogniteFile nodes are registered in FakeFiles."""
+
+    def __init__(self, files: FakeFiles) -> None:
+        super().__init__()
+        self._files = files
+        self.applied: List[Dict[str, Any]] = []
+
+    def apply(self, nodes: Any = None, **kwargs: Any) -> None:
+        self.calls.append(("apply", dict(kwargs, nodes=nodes)))
+        for node in nodes:
+            dumped = node.dump()
+            self.applied.append(dumped)
+            source = dumped["sources"][0]["source"]
+            if source["externalId"] == "CogniteFile":
+                self._files.register(dumped["space"], dumped["externalId"], uploaded=False)
+
+
+class FakeWriteClient:
+    def __init__(self) -> None:
+        self.files = FakeFiles()
+        self.instances = FakeWriteInstances(self.files)
+        self.data_modeling = SimpleNamespace(instances=self.instances)
