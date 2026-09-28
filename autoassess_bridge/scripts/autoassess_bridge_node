@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-3-Clause
+"""Poll the area's Ready AutoAssess plan from CDF and publish it (latched) for the autonomy stack.
+
+Publishes /autoassess/plan (std_msgs/String, plan.json text as written by `dss plan download`),
+/autoassess/inspection_targets (geometry_msgs/PoseArray, one inspection pose per task) and
+/autoassess/plan_id (std_msgs/String). Optionally sends the area box to gbplanner's
+set_global_bound service. Read-only towards CDF; credentials come from COGNITE_* env variables.
+"""
+
+import os
+import sys
+
+import rospy
+from geometry_msgs.msg import Point, Pose, PoseArray, Quaternion
+from planner_msgs.msg import PlanningBound
+from planner_msgs.srv import planner_set_global_bound, planner_set_global_boundRequest
+from std_msgs.msg import String
+
+from autoassess_bridge import cdf
+from autoassess_bridge.bound import GlobalBoundSetter, ServiceUnavailable
+from autoassess_bridge.plan import area_bounds, plan_to_poses
+from autoassess_bridge.poller import PlanPoller
+
+
+class RosLog:
+    info = staticmethod(rospy.loginfo)
+    warning = staticmethod(rospy.logwarn)
+    error = staticmethod(rospy.logerr)
+
+
+def make_bound_call(service_name, timeout_s):
+    proxy = rospy.ServiceProxy(service_name, planner_set_global_bound)
+
+    def call(bounds):
+        try:
+            rospy.wait_for_service(service_name, timeout=timeout_s)
+        except rospy.ROSException as exc:
+            raise ServiceUnavailable("{}: {}".format(service_name, exc))
+        (lo, hi) = bounds
+        req = planner_set_global_boundRequest()
+        req.get_current_bound = False
+        req.reset_to_default = False
+        req.bound = PlanningBound(use_z_val=True, min_val=Point(*lo), max_val=Point(*hi))
+        res = proxy(req)
+        ret = res.bound_ret
+        detail = "min [{:.2f}, {:.2f}, {:.2f}] max [{:.2f}, {:.2f}, {:.2f}]".format(
+            ret.min_val.x, ret.min_val.y, ret.min_val.z, ret.max_val.x, ret.max_val.y, ret.max_val.z
+        )
+        return bool(res.success), detail
+
+    return call
+
+
+def to_pose_array(poses, frame_id):
+    msg = PoseArray()
+    msg.header.frame_id = frame_id
+    msg.header.stamp = rospy.Time.now()
+    msg.poses = [Pose(position=Point(*p), orientation=Quaternion(*q)) for p, q in poses]
+    return msg
+
+
+def main():
+    rospy.init_node("autoassess_bridge")
+    area = rospy.get_param("~area_external_id", "")
+    if not area:
+        rospy.logfatal("Parameter ~area_external_id is required")
+        return 1
+    period_s = float(rospy.get_param("~poll_period_s", 10.0))
+    frame_id = rospy.get_param("~frame_id", "world")
+    standoff_m = float(rospy.get_param("~standoff_m", 0.8))
+    set_bound = bool(rospy.get_param("~set_global_bound", True))
+    margin_m = float(rospy.get_param("~bound_margin_m", 0.3))
+    service_name = rospy.get_param("~global_bound_service", "gbplanner/set_global_bound")
+    timeout_s = float(rospy.get_param("~service_timeout_s", 5.0))
+    space = rospy.get_param("~space", cdf.SPACE)
+
+    try:
+        client = cdf.make_client(os.environ)
+    except ValueError as exc:
+        rospy.logfatal(str(exc))
+        return 1
+
+    log = RosLog()
+    poller = PlanPoller(cdf.PlanSource(client, space=space), area, log)
+    bound = GlobalBoundSetter(make_bound_call(service_name, timeout_s), log) if set_bound else None
+    plan_pub = rospy.Publisher("/autoassess/plan", String, queue_size=1, latch=True)
+    targets_pub = rospy.Publisher("/autoassess/inspection_targets", PoseArray, queue_size=1, latch=True)
+    plan_id_pub = rospy.Publisher("/autoassess/plan_id", String, queue_size=1, latch=True)
+    rospy.loginfo("Polling AutoAssess plans for area %s every %.1f s", area, period_s)
+
+    rate = rospy.Rate(1.0 / period_s)
+    while not rospy.is_shutdown():
+        update = poller.poll()
+        if update is not None:
+            poses, skipped = plan_to_poses(update.plan, standoff_m)
+            plan_pub.publish(String(data=cdf.dumps_plan(update.plan)))
+            targets_pub.publish(to_pose_array(poses, frame_id))
+            plan_id_pub.publish(String(data=update.plan["planExternalId"]))
+            rospy.loginfo(
+                "Published plan %s: %d tasks, %d targets",
+                update.plan["planExternalId"], len(update.plan["tasks"]), len(poses),
+            )
+            if skipped:
+                rospy.logwarn("Tasks without a target (no pose published): %s", ", ".join(skipped))
+            if bound is not None:
+                box = area_bounds(update.element_centres, margin_m)
+                if box is None:
+                    rospy.logwarn("Area has no structural elements; global bound not changed")
+                else:
+                    bound.set_pending(box)
+        if bound is not None:
+            bound.tick()
+        try:
+            rate.sleep()
+        except rospy.ROSInterruptException:
+            break
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

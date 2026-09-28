@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<!-- CDF credentials are read from the COGNITE_* environment variables of this launch. -->
+<launch>
+  <arg name="area_external_id" />
+  <arg name="config" default="$(find autoassess_bridge)/config/autoassess_bridge.yaml" />
+
+  <node pkg="autoassess_bridge" type="autoassess_bridge_node" name="autoassess_bridge" output="screen">
+    <rosparam command="load" file="$(arg config)" />
+    <param name="area_external_id" value="$(arg area_external_id)" />
+  </node>
+</launch>

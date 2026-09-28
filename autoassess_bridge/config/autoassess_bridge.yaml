@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Parameters of autoassess_bridge_node (private namespace). CDF credentials are NOT set here:
+# export COGNITE_PROJECT, COGNITE_CLUSTER, COGNITE_TENANT_ID, COGNITE_CLIENT_ID and
+# COGNITE_CLIENT_SECRET in the environment that starts the node.
+area_external_id: ""            # required: externalId of the AutoAssess area to follow
+space: autoassess               # CDF data-model space of the AutoAssess instances
+poll_period_s: 10.0             # how often to poll CDF
+frame_id: world                 # frame of /autoassess/inspection_targets (plan map frame)
+standoff_m: 0.8                 # distance of each inspection pose from its target
+set_global_bound: true          # send the area box to the planner's global-bound service
+bound_margin_m: 0.3             # padding around the area's structural-element centres
+global_bound_service: gbplanner/set_global_bound
+service_timeout_s: 5.0          # wait per tick for the service before retrying next tick
