@@ -163,6 +163,18 @@ def test_cluster_radius_covers_every_member() -> None:
     assert cluster.inspection_type == "visual"
 
 
+def test_clusters_collect_the_member_classes() -> None:
+    (cluster,) = fnd.merge_findings(
+        [
+            Finding("a", (0, 0, 0), finding_class="crack"),
+            Finding("b", (0.1, 0, 0), finding_class="corrosion"),
+            Finding("c", (0.2, 0, 0)),
+        ]
+    )
+
+    assert cluster.classes == ("corrosion", "crack")
+
+
 def test_merging_prefers_ndt_and_the_highest_confidence() -> None:
     (cluster,) = fnd.merge_findings(
         [
@@ -190,103 +202,3 @@ def test_zero_merge_radius_disables_merging() -> None:
     assert len(clusters) == 2
 
 
-# --- suggestion ids -------------------------------------------------------------------------
-
-
-def test_suggestion_id_joins_sorted_member_ids() -> None:
-    (cluster,) = fnd.merge_findings([Finding("b", (0, 0, 0)), Finding("a", (0.1, 0, 0))])
-
-    assert fnd.finding_suggestion_id(cluster) == "finding:a+b"
-
-
-def test_long_suggestion_ids_are_capped_with_a_hash() -> None:
-    findings = [Finding("f-{:03d}".format(i) * 8, (i * 0.01, 0, 0)) for i in range(30)]
-    (cluster,) = fnd.merge_findings(findings, merge_radius_m=5.0)
-
-    sid = fnd.finding_suggestion_id(cluster)
-
-    assert len(sid) <= 255
-    assert sid.startswith("finding:")
-    assert "+~" in sid
-
-
-def test_covered_finding_ids_reads_suggestion_ids_back() -> None:
-    covered = fnd.covered_finding_ids(["finding:a+b", "finding:c+~deadbeef", "other:x", None])
-
-    assert covered == {"a", "b", "c"}
-
-
-# --- planning tasks -------------------------------------------------------------------------
-
-
-def test_plan_tasks_uses_the_given_normal() -> None:
-    plan = fnd.plan_tasks_from_findings([Finding("a", (1, 0, 0), normal=(0, 0, 1))])
-
-    (task,) = plan.tasks
-    assert task.normal_vector == (0.0, 0.0, 1.0)
-    assert task.normal_source == "given"
-    assert task.position3d == (1.0, 0.0, 0.0)
-    assert task.radius_m == 0.3
-    assert task.inspection_type == "visual"
-    assert task.suggestion_id == "finding:a"
-
-
-def test_plan_tasks_falls_back_to_facing_the_centroid() -> None:
-    plan = fnd.plan_tasks_from_findings(
-        [Finding("a", (2, 0, 0)), Finding("b", (-2, 0, 0), normal=(0, 1, 0))],
-        merge_radius_m=0.1,
-    )
-
-    by_id = {t.suggestion_id: t for t in plan.tasks}
-    assert by_id["finding:a"].normal_vector == (-1.0, 0.0, 0.0)  # towards the centroid (0,0,0)
-    assert by_id["finding:a"].normal_source == "centroid"
-    assert by_id["finding:b"].normal_source == "given"
-    assert plan.interior_point == (0.0, 0.0, 0.0)
-
-
-def test_plan_tasks_uses_a_provided_interior_point() -> None:
-    plan = fnd.plan_tasks_from_findings([Finding("a", (0, 0, 5))], interior_point=(0.0, 0.0, 0.0))
-
-    (task,) = plan.tasks
-    assert task.normal_vector == (0.0, 0.0, -1.0)
-
-
-def test_plan_tasks_for_a_finding_at_the_centroid_uses_up() -> None:
-    plan = fnd.plan_tasks_from_findings([Finding("a", (1, 1, 1))], interior_point=(1.0, 1.0, 1.0))
-
-    assert plan.tasks[0].normal_vector == (0.0, 0.0, 1.0)
-
-
-def test_plan_tasks_skips_findings_already_in_the_plan() -> None:
-    plan = fnd.plan_tasks_from_findings(
-        [Finding("a", (0, 0, 0)), Finding("b", (9, 9, 9))],
-        existing_suggestion_ids=["finding:a"],
-    )
-
-    assert [t.suggestion_id for t in plan.tasks] == ["finding:b"]
-    assert plan.already_in_plan == 1
-
-
-def test_plan_tasks_skips_a_cluster_whose_suggestion_id_exists() -> None:
-    plan = fnd.plan_tasks_from_findings(
-        [Finding("a", (0, 0, 0)), Finding("b", (0.1, 0, 0))],
-        existing_suggestion_ids=["finding:a+b"],
-    )
-
-    assert plan.tasks == []
-    assert plan.already_in_plan == 2
-
-
-def test_plan_tasks_with_no_findings_is_empty() -> None:
-    plan = fnd.plan_tasks_from_findings([])
-
-    assert plan.tasks == []
-    assert plan.already_in_plan == 0
-
-
-def test_task_normals_are_unit_length() -> None:
-    plan = fnd.plan_tasks_from_findings([Finding("a", (3, 4, 0))], interior_point=(0.0, 0.0, 0.0))
-
-    normal = plan.tasks[0].normal_vector
-    assert math.sqrt(sum(v * v for v in normal)) == pytest.approx(1.0)
-    assert normal == pytest.approx((-0.6, -0.8, 0.0))

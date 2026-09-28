@@ -11,7 +11,8 @@
 # waits for a Ready plan (mark one Ready in the UI, or set MARK_READY_CMD), asserts the plan
 # topics, publishes three findings (one with a normal, one without, one bad -> skipped),
 # runs the stub gbplanner mission, and asserts /autoassess/upload_status reaches `complete`
-# with a findings plan id. Any missing step exits non-zero. CDF is only written in $TEST_AREA.
+# with the findings stored as DefectDetection nodes on the new campaign (read back from CDF).
+# Any missing step exits non-zero. CDF is only written in $TEST_AREA.
 set -eo pipefail
 : "${TEST_AREA:?set TEST_AREA to the e2e area externalId (the only area that will be written to)}"
 dump_logs() {
@@ -81,7 +82,7 @@ step stub gbplanner mission
 python3 /ws/src/autoassess_bridge/e2e/stub_gbplanner.py >/tmp/stub.log 2>&1 &
 STUB=$!
 
-step wait for upload complete with a findings plan
+step wait for upload complete with defects on the campaign
 python3 - "$UPLOAD_TIMEOUT_S" <<'PY'
 import json, sys, rospy
 from std_msgs.msg import String
@@ -100,10 +101,42 @@ while not rospy.is_shutdown() and final is None and rospy.get_time() < deadline:
 assert final is not None, "no terminal upload_status"
 assert final["state"] == "complete", final
 findings = final["findings"]
-assert findings and findings.get("planExternalId", "").startswith("plan-"), final
-assert findings["count"] >= 1, final
+assert findings and findings["count"] == 2, final
+ids = findings["defectExternalIds"]
+assert len(ids) == 2 and all(i.startswith("defect-") for i in ids), final
 print("CAMPAIGN:", final["campaignExternalId"])
-print("FINDINGS_PLAN:", findings["planExternalId"])
+print("DEFECTS:", " ".join(ids))
+with open("/tmp/e2e_result.env", "w") as fh:
+    fh.write("CAMPAIGN={}\nDEFECTS={}\n".format(final["campaignExternalId"], ",".join(ids)))
+PY
+
+step read the defects back from CDF
+source /tmp/e2e_result.env
+python3 - "$CAMPAIGN" "$DEFECTS" <<'PY'
+import os, sys
+sys.path.insert(0, "/ws/src/autoassess_bridge/src")
+from autoassess_bridge import cdf
+from cognite.client.data_classes.data_modeling import ViewId
+campaign, ids = sys.argv[1], sys.argv[2].split(",")
+client = cdf.make_client(os.environ)
+view = ViewId("autoassess", "DefectDetectionView", "1")
+nodes = client.data_modeling.instances.retrieve(
+    nodes=[("autoassess", i) for i in ids], sources=[view]
+).nodes
+assert len(nodes) == len(ids), "expected {} defects, got {}".format(len(ids), len(nodes))
+saw_normal = saw_no_normal = False
+for node in nodes:
+    props = dict(node.properties[view])
+    assert props["status"] == "New", props
+    assert props["source"] == "ml", props
+    assert props["campaign"]["externalId"] == campaign, props
+    assert len(props["boundingBox3d"]) == 9, props
+    saw_normal = saw_normal or "normal3d" in props
+    saw_no_normal = saw_no_normal or "normal3d" not in props
+    print("defect:", node.external_id, props["defectClass"], props["probability"],
+          props["boundingBox3d"][:3], props.get("normal3d"))
+assert saw_normal and saw_no_normal, "expected one defect with and one without a normal"
+print("DEFECTS-IN-CDF-OK")
 PY
 
 kill -INT $BRIDGE $STUB 2>/dev/null || true; wait $BRIDGE $STUB 2>/dev/null || true

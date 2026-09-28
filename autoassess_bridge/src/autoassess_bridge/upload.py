@@ -15,9 +15,10 @@ only writes when ~upload_enabled is true. The upload follows the AutoAssess grou
   status InProgress and createdBy autoassess_bridge; its file ids are set once the files are
   uploaded, then the status becomes Complete. Nothing existing is changed or deleted.
 
-At mission end the buffered /autoassess/findings also become a Draft inspection plan
-(`FindingsPlanService`, mirroring the SDK's `plans.create` + `add_region_tasks`), sequenced by
-`MissionFlow`: upload first, then the findings plan, then one final status carrying both.
+At mission end the buffered /autoassess/findings are stored as DefectDetection nodes on the
+just-created campaign (`DefectService`), sequenced by `MissionFlow`: upload first, then the
+defects, then one final status carrying both. So the node's writes are: CogniteFiles, the
+campaign, and defects.
 """
 
 from __future__ import annotations
@@ -37,19 +38,14 @@ from cognite.client.data_classes.data_modeling import NodeId, ViewId
 from cognite.client.data_classes.data_modeling.instances import NodeApply, NodeOrEdgeData
 
 from autoassess_bridge.cdf import SPACE
-from autoassess_bridge.findings import (
-    DEFAULT_MERGE_RADIUS_M,
-    Finding,
-    plan_tasks_from_findings,
-)
+from autoassess_bridge.findings import DEFAULT_MERGE_RADIUS_M, Finding, merge_findings
 
 CREATED_BY = "autoassess_bridge"
 MIME_TYPE = "application/octet-stream"
 INSPECTION_RESULT_VIEW = ("InspectionResultView", "1")
-INSPECTION_PLAN_VIEW = ("InspectionPlanView", "4")
-INSPECTION_TASK_VIEW = ("InspectionTaskView", "1")
-INSPECTION_TASK_CONTAINER = "InspectionTaskContainer"
-_TASK_CHUNK = 1000
+DEFECT_DETECTION_VIEW = ("DefectDetectionView", "1")
+DEFAULT_DEFECT_PROBABILITY = 0.5  # DefectDetectionContainer.probability is non-nullable
+_DEFECT_CHUNK = 1000
 _MAX_EXTERNAL_ID = 255
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 _KINDS = {".ply": "ply", ".pcd": "pcd"}
@@ -314,8 +310,9 @@ def status_message(
 ) -> Dict[str, Any]:
     """Content of /autoassess/upload_status (published as JSON).
 
-    `findings` is filled on the final status of a mission: {"count", "planExternalId"} for the
-    created Draft findings plan, {"error": …} when creating it failed, null without findings.
+    `findings` is filled on the final status of a mission: {"count", "defectExternalIds"} for
+    the DefectDetection nodes stored on the campaign, {"error": …} when storing them failed,
+    null without findings.
     """
     return {
         "findings": findings,
@@ -464,20 +461,20 @@ class MissionUploadRunner:
 
 
 @dataclass(frozen=True)
-class FindingsPlanResult:
-    plan_external_id: str
-    task_count: int
-    already_in_plan: int = 0
+class DefectResult:
+    defect_external_ids: List[str]  # every defect of this mission's findings (new and existing)
+    created: int
+    already_existing: int
 
 
-class FindingsPlanService:
-    """Creates the Draft findings plan in CDF, mirroring the AutoAssess SDK.
+class DefectService:
+    """Stores findings as DefectDetection nodes (autoassess/DefectDetectionView/1) in CDF.
 
-    The plan node is `plan-<uuid4>` (Draft, area, optional map relation, provenance in the
-    description); each task is a `task-<uuid4>` region task with a `finding:` suggestionId.
-    A `mission id -> plan externalId` registry makes retries idempotent: the retry re-reads the
-    plan's task suggestionIds and only findings not yet covered become new tasks.
-    `log` needs info() and warning().
+    One node per merged cluster of findings, attached to the mission's campaign, with
+    `status: New` and `source: ml` so they appear in the viewer's Defects tab for review
+    (Confirm -> Suggestions -> task). The external id `defect-<missionId>-<sha1(ids)[:12]>` is
+    deterministic, so a retry retrieves the ids and only creates what is missing — no
+    registry. `log` needs info() and warning().
     """
 
     def __init__(
@@ -486,137 +483,97 @@ class FindingsPlanService:
         log: Any,
         space: str = SPACE,
         merge_radius_m: float = DEFAULT_MERGE_RADIUS_M,
-        new_uuid: Callable[[], uuid.UUID] = uuid.uuid4,
     ) -> None:
         self._client = client
         self._log = log
         self._space = space
         self._merge_radius_m = merge_radius_m
-        self._new_uuid = new_uuid
-        self._plans: Dict[str, str] = {}  # mission id -> findings plan externalId
 
     def create(
         self,
-        ctx: MissionContext,
-        map_external_id: Optional[str],
+        ctx: Optional[MissionContext],
+        campaign_external_id: Optional[str],
         findings: Sequence[Finding],
-    ) -> FindingsPlanResult:
+    ) -> DefectResult:
+        if ctx is None:
+            raise ValueError("No mission context")
         if not findings:
-            raise ValueError("No findings to create a plan from")
-        plan_external_id = self._plans.get(ctx.mission_id)
-        existing = self._task_suggestion_ids(plan_external_id) if plan_external_id else []
-        task_plan = plan_tasks_from_findings(
-            findings,
-            merge_radius_m=self._merge_radius_m,
-            existing_suggestion_ids=existing,
-        )
-        if plan_external_id is None:
-            plan_external_id = self._create_plan(ctx, map_external_id)
-            self._plans[ctx.mission_id] = plan_external_id
-        if task_plan.tasks:
-            self._add_tasks(plan_external_id, task_plan.tasks)
-        self._log.info(
-            "Findings plan {}: {} task(s) created, {} finding(s) already covered".format(
-                plan_external_id, len(task_plan.tasks), task_plan.already_in_plan
-            )
-        )
-        return FindingsPlanResult(
-            plan_external_id,
-            task_count=len(task_plan.tasks),
-            already_in_plan=task_plan.already_in_plan,
-        )
-
-    def _create_plan(self, ctx: MissionContext, map_external_id: Optional[str]) -> str:
-        external_id = "plan-{}".format(self._new_uuid())
-        description = "Created by {} from mission {}".format(CREATED_BY, ctx.mission_id)
-        if ctx.plan_external_id:
-            description += " / plan {}".format(ctx.plan_external_id)
-        properties: Dict[str, Any] = {
-            "area": {"space": self._space, "externalId": ctx.area_external_id},
-            "status": "Draft",
-            "name": "Findings {}".format(ctx.mission_id),
-            "description": description,
-        }
-        if map_external_id:
-            properties["map"] = {"space": self._space, "externalId": map_external_id}
-        else:
+            raise ValueError("No findings to store")
+        clusters = merge_findings(findings, self._merge_radius_m)
+        external_ids = [self._external_id(ctx.mission_id, c.member_ids) for c in clusters]
+        existing = self._existing(external_ids)
+        if campaign_external_id is None:
             self._log.warning(
-                "Findings plan {} gets no reference map: the flown plan had none and no "
-                "campaign was uploaded".format(external_id)
+                "Mission {} has no campaign (upload failed?); defects are attached to area {} "
+                "instead".format(ctx.mission_id, ctx.area_external_id)
             )
-        self._client.data_modeling.instances.apply(
-            nodes=[
-                NodeApply(
-                    space=self._space,
-                    external_id=external_id,
-                    sources=[
-                        NodeOrEdgeData(
-                            source=ViewId(self._space, *INSPECTION_PLAN_VIEW),
-                            properties=properties,
-                        )
-                    ],
-                )
-            ]
-        )
-        return external_id
-
-    def _add_tasks(self, plan_external_id: str, tasks: Sequence[Any]) -> None:
-        nodes = []
-        for task in tasks:
-            properties = {
-                "plan": {"space": self._space, "externalId": plan_external_id},
-                "taskType": "region",
-                "inspectionType": task.inspection_type,
-                "position3d": [float(v) for v in task.position3d],
-                "normalVector": [float(v) for v in task.normal_vector],
-                "radiusM": float(task.radius_m),
-                "suggestionId": task.suggestion_id,
-            }
-            nodes.append(
-                NodeApply(
-                    space=self._space,
-                    external_id="task-{}".format(uuid.uuid4()),
-                    sources=[
-                        NodeOrEdgeData(
-                            source=ViewId(self._space, *INSPECTION_TASK_VIEW),
-                            properties=properties,
-                        )
-                    ],
-                )
+        nodes = [
+            self._node(ctx, campaign_external_id, cluster, external_id)
+            for cluster, external_id in zip(clusters, external_ids)
+            if external_id not in existing
+        ]
+        for i in range(0, len(nodes), _DEFECT_CHUNK):
+            self._client.data_modeling.instances.apply(nodes=nodes[i : i + _DEFECT_CHUNK])
+        self._log.info(
+            "Stored {} defect(s) ({} already existed) for mission {}".format(
+                len(nodes), len(existing), ctx.mission_id
             )
-        for i in range(0, len(nodes), _TASK_CHUNK):
-            self._client.data_modeling.instances.apply(nodes=nodes[i : i + _TASK_CHUNK])
-
-    def _task_suggestion_ids(self, plan_external_id: str) -> List[str]:
-        view = ViewId(self._space, *INSPECTION_TASK_VIEW)
-        items = self._client.data_modeling.instances.list(
-            instance_type="node",
-            sources=[view],
-            filter={
-                "equals": {
-                    "property": [self._space, INSPECTION_TASK_CONTAINER, "plan"],
-                    "value": {"space": self._space, "externalId": plan_external_id},
-                }
-            },
-            limit=10000,
         )
-        ids: List[str] = []
-        for item in items:
-            props = dict((getattr(item, "properties", None) or {}).get(view) or {})
-            sid = props.get("suggestionId")
-            if sid:
-                ids.append(str(sid))
-        return ids
+        return DefectResult(
+            defect_external_ids=external_ids,
+            created=len(nodes),
+            already_existing=len(existing),
+        )
+
+    def _external_id(self, mission_id, member_ids):
+        digest = hashlib.sha1("+".join(sorted(member_ids)).encode("utf-8")).hexdigest()[:12]
+        return "defect-{}-{}".format(mission_id, digest)
+
+    def _existing(self, external_ids):
+        result = self._client.data_modeling.instances.retrieve(
+            nodes=[(self._space, external_id) for external_id in external_ids]
+        )
+        return {node.external_id for node in result.nodes}
+
+    def _node(self, ctx, campaign_external_id, cluster, external_id):
+        centre = cluster.position
+        properties = {
+            "probability": (
+                cluster.confidence if cluster.confidence is not None else DEFAULT_DEFECT_PROBABILITY
+            ),
+            "defectClass": "+".join(cluster.classes) if cluster.classes else "finding",
+            # Oriented box [cx, cy, cz, hx, hy, hz, rx, ry, rz]: the centre with zero
+            # extents/rotation, like the viewer's manually placed defects.
+            "boundingBox3d": [float(centre[0]), float(centre[1]), float(centre[2]),
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "status": "New",
+            "source": "ml",
+        }
+        if cluster.normal is not None:
+            properties["normal3d"] = [float(v) for v in cluster.normal]
+        if campaign_external_id:
+            properties["campaign"] = {"space": self._space, "externalId": campaign_external_id}
+        else:
+            properties["area"] = {"space": self._space, "externalId": ctx.area_external_id}
+        return NodeApply(
+            space=self._space,
+            external_id=external_id,
+            sources=[
+                NodeOrEdgeData(
+                    source=ViewId(self._space, *DEFECT_DETECTION_VIEW), properties=properties
+                )
+            ],
+        )
 
 
 class MissionFlow:
-    """One mission's writes in order: upload, findings plan, then one final status.
+    """One mission's writes in order: upload, then the findings' defects, one final status.
 
     The runner is constructed with `publish_status=flow.runner_publish_status`: intermediate
-    statuses pass through, the terminal one (complete/failed) is held back until the findings
-    plan is created, then published once with the `findings` field filled in. A partial upload
-    failure still creates the findings plan. When creating it fails, the buffer is kept for a
-    `~submit_findings` retry. `log` needs info(), warning() and error().
+    statuses pass through, the terminal one (complete/failed) is held back until the defects
+    are stored on the new campaign, then published once with the `findings` field filled in.
+    A partial upload failure still stores the defects. When storing them fails, the buffer is
+    kept for a `~submit_findings` retry. `log` needs info(), warning() and error().
     """
 
     def __init__(self, runner: Optional[Any], findings_service: Any, buffer: Any,
@@ -627,6 +584,7 @@ class MissionFlow:
         self._publish = publish_status
         self._log = log
         self._held: Optional[Dict[str, Any]] = None
+        self._mission_campaigns: Dict[str, Optional[str]] = {}
         self._lock = threading.Lock()
 
     def bind(self, runner: Any) -> None:
@@ -653,7 +611,10 @@ class MissionFlow:
             return False, NO_PLAN_MESSAGE
         self._held = None
         ok, message = self._runner.run(ctx)
-        findings_info, note = self._create_findings_plan(ctx)
+        campaign = (self._held or {}).get("campaignExternalId")
+        if campaign or ctx.mission_id not in self._mission_campaigns:
+            self._mission_campaigns[ctx.mission_id] = campaign
+        findings_info, note = self._create_defects(ctx)
         final = self._held or status_message("complete" if ok else "failed", ctx, message=message)
         final["findings"] = findings_info
         final["updatedAt"] = datetime.now(timezone.utc).isoformat()
@@ -661,39 +622,41 @@ class MissionFlow:
         return ok, message + note
 
     def submit_findings(self, ctx: Optional[MissionContext]) -> Tuple[bool, str]:
-        """Manual ~submit_findings: create the plan from the current buffer, outside an upload."""
+        """Manual ~submit_findings: store the buffered findings as defects, outside an upload."""
         if ctx is None:
             return False, NO_PLAN_MESSAGE
         snapshot = self._buffer.snapshot()
         if not snapshot:
             return False, "No findings buffered"
+        campaign = self._mission_campaigns.get(ctx.mission_id)
         try:
-            result = self._service.create(ctx, ctx.map_external_id, snapshot)
+            result = self._service.create(ctx, campaign, snapshot)
         except Exception as exc:  # noqa: BLE001 - report; the buffer is kept for a retry
-            message = "Creating the findings plan failed: {}: {}".format(type(exc).__name__, exc)
+            message = "Storing the defects failed: {}: {}".format(type(exc).__name__, exc)
             self._log.error(message)
             return False, message
         self._buffer.discard([f.id for f in snapshot])
-        return True, "Created findings plan {} with {} task(s)".format(
-            result.plan_external_id, result.task_count
+        return True, "Stored {} defect(s): {}".format(
+            len(result.defect_external_ids), ", ".join(result.defect_external_ids)
         )
 
-    def _create_findings_plan(
-        self, ctx: MissionContext
-    ) -> Tuple[Optional[Dict[str, Any]], str]:
+    def _create_defects(self, ctx):
         snapshot = self._buffer.snapshot()
         if not snapshot:
             return None, ""
-        campaign = (self._held or {}).get("campaignExternalId")
-        map_external_id = ctx.map_external_id or campaign
+        campaign = self._mission_campaigns.get(ctx.mission_id)
         try:
-            result = self._service.create(ctx, map_external_id, snapshot)
+            result = self._service.create(ctx, campaign, snapshot)
         except Exception as exc:  # noqa: BLE001 - keep the buffer for ~submit_findings
-            message = "Creating the findings plan failed (findings kept for ~submit_findings): "                 "{}: {}".format(type(exc).__name__, exc)
+            message = ("Storing the defects failed (findings kept for ~submit_findings): "
+                       "{}: {}".format(type(exc).__name__, exc))
             self._log.error(message)
             return {"error": "{}: {}".format(type(exc).__name__, exc)}, ""
         self._buffer.discard([f.id for f in snapshot])
         return (
-            {"count": result.task_count, "planExternalId": result.plan_external_id},
-            "; findings plan {} ({} task(s))".format(result.plan_external_id, result.task_count),
+            {
+                "count": len(result.defect_external_ids),
+                "defectExternalIds": list(result.defect_external_ids),
+            },
+            "; {} defect(s) stored on the campaign".format(len(result.defect_external_ids)),
         )

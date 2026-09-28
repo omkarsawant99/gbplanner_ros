@@ -9,10 +9,8 @@ none), ``radius`` (metres, default 0.3), ``inspection_type`` (``visual`` | ``ndt
 ``class``, ``confidence`` (0..1) and ``description``. Bad entries are reported, not raised.
 
 Findings are buffered (deduped by id) during the mission. At mission end they are merged
-within a radius and become region tasks with ``suggestionId = "finding:<id>[+<id>…]"``, the
-same convention as the AutoAssess SDK, which makes retries idempotent. Normals: the finding's
-own, else facing the findings' centroid (nearest-mesh-normal estimation is a follow-up).
-Writing the plan to CDF is upload.py's job; this module is pure.
+within a radius, and each merged cluster is stored as one DefectDetection node on the
+mission's campaign — writing to CDF is upload.py's job; this module is pure.
 """
 
 from __future__ import annotations
@@ -29,10 +27,7 @@ Vec3 = Tuple[float, float, float]
 DEFAULT_RADIUS_M = 0.3
 DEFAULT_MERGE_RADIUS_M = 0.5
 DEFAULT_BUFFER_CAP = 5000
-SUGGESTION_PREFIX = "finding:"
-MAX_SUGGESTION_ID_LENGTH = 255
 MAX_ID_LENGTH = 200
-_UP = (0.0, 0.0, 1.0)
 
 _FIELDS = (
     "id", "x", "y", "z", "nx", "ny", "nz",
@@ -64,26 +59,8 @@ class FindingCluster:
     normal: Optional[Vec3]  # mean of the members' known normals, if any
     radius_m: float  # covers every member's own radius
     inspection_type: str  # ndt_thickness if any member needs it
+    classes: Tuple[str, ...] = ()  # distinct member classes, sorted
     confidence: Optional[float] = None  # highest member confidence
-
-
-@dataclass(frozen=True)
-class PlannedTask:
-    """A region task to create, with the same fields as the AutoAssess SDK's NewRegionTask."""
-
-    position3d: Vec3
-    normal_vector: Vec3
-    radius_m: float
-    inspection_type: str
-    suggestion_id: str
-    normal_source: str  # "given" | "centroid"
-
-
-@dataclass(frozen=True)
-class TaskPlan:
-    tasks: List[PlannedTask]
-    already_in_plan: int = 0  # findings skipped: a task already covers them
-    interior_point: Optional[Vec3] = None  # what fallback normals were oriented towards
 
 
 class _InvalidEntry(ValueError):
@@ -317,107 +294,9 @@ def _finish(builder: _ClusterBuilder, default_radius_m: float) -> FindingCluster
         normal=_unit((builder.normal_sum[0], builder.normal_sum[1], builder.normal_sum[2])),
         radius_m=radius,
         inspection_type="ndt_thickness" if needs_ndt else "visual",
+        classes=tuple(sorted({f.finding_class for f in builder.members if f.finding_class})),
         confidence=max(confidences) if confidences else None,
     )
-
-
-# --- suggestion ids -------------------------------------------------------------------------
-
-
-def finding_suggestion_id(cluster: FindingCluster) -> str:
-    """``finding:<id>`` / ``finding:<id1>+<id2>…`` (sorted), capped at 255 characters.
-
-    When capped, as many ids as fit are kept, followed by ``+~<hash>`` of the full id.
-    """
-    ids = sorted(cluster.member_ids)
-    full = SUGGESTION_PREFIX + "+".join(ids)
-    if len(full) <= MAX_SUGGESTION_ID_LENGTH:
-        return full
-    digest = "~" + hashlib.sha256(full.encode("utf-8")).hexdigest()[:12]
-    kept: List[str] = []
-    length = len(SUGGESTION_PREFIX) + len(digest)
-    for finding_id in ids:
-        if length + len(finding_id) + 1 > MAX_SUGGESTION_ID_LENGTH:
-            break
-        kept.append(finding_id)
-        length += len(finding_id) + 1
-    return SUGGESTION_PREFIX + "+".join(kept + [digest])
-
-
-def covered_finding_ids(suggestion_ids: Iterable[Optional[str]]) -> set:
-    """Finding ids named by existing tasks' ``finding:`` suggestion ids."""
-    covered = set()
-    for sid in suggestion_ids:
-        if not sid or not sid.startswith(SUGGESTION_PREFIX):
-            continue
-        for token in sid[len(SUGGESTION_PREFIX):].split("+"):
-            if token and not token.startswith("~"):
-                covered.add(token)
-    return covered
-
-
-# --- planning tasks -------------------------------------------------------------------------
-
-
-def plan_tasks_from_findings(
-    findings: Sequence[Finding],
-    merge_radius_m: float = DEFAULT_MERGE_RADIUS_M,
-    default_radius_m: float = DEFAULT_RADIUS_M,
-    existing_suggestion_ids: Iterable[Optional[str]] = (),
-    interior_point: Optional[Vec3] = None,
-) -> TaskPlan:
-    """Turn buffered findings into region tasks (nothing is written).
-
-    Findings covered by `existing_suggestion_ids` (the plan's current tasks) are skipped, so a
-    retry adds nothing twice. Normals: the finding's own, else the direction towards
-    `interior_point` (default: the findings' bounding-box centre).
-    """
-    existing = {sid for sid in existing_suggestion_ids if sid}
-    covered = covered_finding_ids(existing)
-    fresh = [f for f in findings if f.id not in covered]
-    skipped = len(findings) - len(fresh)
-
-    clusters = merge_findings(fresh, merge_radius_m, default_radius_m)
-    kept: List[FindingCluster] = []
-    for cluster in clusters:
-        if finding_suggestion_id(cluster) in existing:
-            skipped += len(cluster.member_ids)
-        else:
-            kept.append(cluster)
-    if not kept:
-        return TaskPlan(tasks=[], already_in_plan=skipped)
-
-    interior = interior_point or _bbox_centre([f.position for f in findings])
-    tasks = [_planned_task(cluster, interior) for cluster in kept]
-    return TaskPlan(tasks=tasks, already_in_plan=skipped, interior_point=interior)
-
-
-def _planned_task(cluster: FindingCluster, interior: Vec3) -> PlannedTask:
-    normal = cluster.normal
-    source = "given"
-    if normal is None:
-        normal = _unit(
-            (
-                interior[0] - cluster.position[0],
-                interior[1] - cluster.position[1],
-                interior[2] - cluster.position[2],
-            )
-        ) or _UP
-        source = "centroid"
-    return PlannedTask(
-        position3d=cluster.position,
-        normal_vector=normal,
-        radius_m=cluster.radius_m,
-        inspection_type=cluster.inspection_type,
-        suggestion_id=finding_suggestion_id(cluster),
-        normal_source=source,
-    )
-
-
-def _bbox_centre(points: Sequence[Vec3]) -> Vec3:
-    lo = [min(p[i] for p in points) for i in range(3)]
-    hi = [max(p[i] for p in points) for i in range(3)]
-    return ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)
 
 
 def _unit(v: Tuple[float, float, float]) -> Optional[Vec3]:

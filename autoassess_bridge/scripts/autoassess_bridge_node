@@ -16,8 +16,8 @@ Credentials come from COGNITE_* env variables.
 Findings from the detection stack arrive as JSON on /autoassess/findings (always subscribed,
 buffered per mission). With ~upload_enabled (default false) the node writes the mission to CDF
 (its only writes): the gbplanner mesh plus the ~mission_dir files as CogniteFiles, an
-AutoAssess campaign that lists them, and a Draft findings plan built from the buffered
-findings (~submit_findings retries just that). An upload runs on the ~upload_mission service
+AutoAssess campaign that lists them, and one DefectDetection node per (merged) finding on that
+campaign (~submit_findings retries just the defects). An upload runs on the ~upload_mission service
 (std_srvs/Trigger) and, with ~upload_on_mission_end, when the mission looks finished
 (homing, no new path for ~mission_end_quiet_s, robot still). Progress: /autoassess/upload_status.
 """
@@ -45,7 +45,7 @@ from autoassess_bridge.mission_end import MissionEndDetector
 from autoassess_bridge.plan import area_bounds, plan_to_poses
 from autoassess_bridge.poller import PlanPoller
 from autoassess_bridge.upload import (
-    FindingsPlanService,
+    DefectService,
     FollowedPlans,
     MissionContext,
     MissionFlow,
@@ -119,7 +119,7 @@ class FindingsListener:
         if not self._upload_enabled and not self._warned_disabled and (findings or errors):
             self._warned_disabled = True
             rospy.logwarn(
-                "Findings received but ~upload_enabled is false: no findings plan will be created"
+                "Findings received but ~upload_enabled is false: no defects will be stored"
             )
         if self._buffer.dropped:
             rospy.logwarn_throttle(60, "Findings buffer full: %d dropped", self._buffer.dropped)
@@ -145,13 +145,13 @@ class MissionUploads:
             )
         else:
             rospy.logwarn("~mesh_filename is empty: uploads contain only the ~mission_dir files")
-        findings_service = FindingsPlanService(
+        defect_service = DefectService(
             client,
             RosLog(),
             space=space,
             merge_radius_m=float(rospy.get_param("~findings_merge_radius_m", 0.5)),
         )
-        self._flow = MissionFlow(None, findings_service, findings_buffer, self._publish, RosLog())
+        self._flow = MissionFlow(None, defect_service, findings_buffer, self._publish, RosLog())
         self._flow.bind(
             MissionUploadRunner(
                 MissionUploader(client, RosLog(), space=space),

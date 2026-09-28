@@ -8,8 +8,8 @@ Cognite Data Fusion (CDF). It does three things:
 2. It publishes the plan's **reference map** as a latched point cloud on
    `/ballast_tank/pointcloud`. You no longer need to download the map and run `pcd_to_pointcloud`.
 3. Optionally, it **uploads the finished mission** (mesh and point clouds) as a new AutoAssess
-   campaign, and turns findings reported on `/autoassess/findings` into a **Draft inspection
-   plan** for review.
+   campaign, and stores findings reported on `/autoassess/findings` as **defects** on that
+   campaign for review.
 
 By default the node only reads from CDF (`instances.list` / `instances.retrieve`, file
 downloads). With `~upload_enabled: true` it also writes the mission upload
@@ -145,22 +145,27 @@ The detection stack reports findings by publishing JSON on `/autoassess/findings
 | `class`, `confidence`, `description` | optional metadata (`confidence` 0..1) |
 
 Bad entries are logged (once per distinct error) and skipped; good ones are buffered for the
-current mission. At mission end — after the upload, in the same step — the buffered findings
-become a **Draft** inspection plan in the flown plan's area: findings closer than
-`~findings_merge_radius_m` (0.5 m) merge into one region task, each task carries
-`suggestionId: finding:<id>[+<id>…]`, and the plan's description records the provenance
-("Created by autoassess_bridge from mission … / plan …"). The plan's reference map is the
-flown plan's; if that had none, the just-uploaded campaign. The final
-`/autoassess/upload_status` then has `findings: {"count": …, "planExternalId": …}`.
-Normals: the finding's own, else facing the findings' centroid (mesh-based estimation is a
-follow-up). An inspector reviews the Draft in the AutoAssess viewer and marks it Ready; the
-bridge never follows its own Draft plans.
+current mission. At mission end — after the upload, in the same step — each buffered finding
+becomes a **DefectDetection** node on the just-created campaign (findings closer than
+`~findings_merge_radius_m`, 0.5 m, merge into one defect):
 
-- The topic is always subscribed. With `~upload_enabled: false` the node warns that no plan
-  will be created.
-- If creating the plan fails, the findings are kept; `~submit_findings` (`std_srvs/Trigger`)
-  retries just the plan. Retries are idempotent (existing `finding:` suggestion ids are
-  skipped). Re-detections in a *later* mission intentionally land in that mission's new plan.
+- `boundingBox3d`: the finding position with zero extents/rotation (like manually placed
+  defects), `normal3d` only when the finding gave one;
+- `defectClass`: the finding's `class` (merged classes joined with `+`), else `finding`;
+- `probability`: the finding's `confidence`, else 0.5 (the field is required);
+- `status: New`, `source: ml`, external id `defect-<missionId>-<hash>` (deterministic, so
+  retries never duplicate).
+
+The final `/autoassess/upload_status` then has
+`findings: {"count": …, "defectExternalIds": […]}`. The review path is the viewer's
+**Defects tab**: Confirm a defect → it appears under Suggestions → add it to a plan as a
+task. No plan is created automatically.
+
+- The topic is always subscribed. With `~upload_enabled: false` the node warns that no
+  defects will be stored.
+- If storing the defects fails, the findings are kept; `~submit_findings`
+  (`std_srvs/Trigger`) retries just the defects. Re-detections in a *later* mission
+  intentionally become that mission's defects.
 
 ## Mission upload
 

@@ -145,6 +145,9 @@ class FakeWriteInstances(FakeInstances):
             source = dumped["sources"][0]["source"]
             if source["externalId"] == "CogniteFile":
                 self._files.register(dumped["space"], dumped["externalId"], uploaded=False)
+            self.retrievable[(dumped["space"], dumped["externalId"])] = SimpleNamespace(
+                space=dumped["space"], external_id=dumped["externalId"], instance_type="node"
+            )
 
 
 class FakeWriteClient:

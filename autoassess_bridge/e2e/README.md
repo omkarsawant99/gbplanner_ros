@@ -1,7 +1,7 @@
 # autoassess_bridge full-loop e2e
 
 `full_loop.sh` walks the whole loop against a **test area** of a real CDF project: Ready plan →
-topics → findings → stub mission → upload → campaign + Draft findings plan. It writes to CDF
+topics → findings → stub mission → upload → campaign + DefectDetection nodes. It writes to CDF
 (only in `$TEST_AREA`), so use a test project/area and credentials you are allowed to write with.
 
 ## What you need
@@ -32,12 +32,15 @@ Ordered checklist (the script asserts each step and exits non-zero on a miss):
    one bad (missing `x`) that must be logged and skipped.
 6. The stub gbplanner (`stub_gbplanner.py`) serves `generate_mesh` and flies one fake mission:
    three paths, homing, then standing still.
-7. The bridge detects the mission end, uploads the mesh, creates the campaign, creates the
-   Draft findings plan, and publishes one final `upload_status` with `state: complete` and
-   `findings: {count, planExternalId}`. The script prints `CAMPAIGN:` and `FINDINGS_PLAN:`.
+7. The bridge detects the mission end, uploads the mesh, creates the campaign, stores one
+   `DefectDetection` node per (merged) finding on it, and publishes one final `upload_status`
+   with `state: complete` and `findings: {count, defectExternalIds}`. The script prints
+   `CAMPAIGN:` and `DEFECTS:`.
+8. The defects are read back from CDF: `status: New`, `source: ml`, attached to the campaign,
+   one with the given normal and one without.
 
 Afterwards, in the AutoAssess viewer: the campaign appears in the area (its 3D model once the
 `dss worker` has built it — start it with `roslaunch autoassess_bridge autoassess_full.launch`),
-and the findings plan appears as a Draft with one task per (merged) finding and the provenance
-in its description. Clean up by deleting/ignoring the test campaign and plan as your project
-prefers; the bridge never deletes anything.
+and the findings show up in the Defects tab as `New` for review (Confirm → Suggestions → task).
+Clean up by deleting/ignoring the test campaign and defects as your project prefers; the bridge
+never deletes anything.
