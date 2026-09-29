@@ -9,8 +9,9 @@
 #     -v <folder with extra .pcd files>:/mission:ro \
 #     ros:noetic-ros-base bash /src/autoassess_bridge/e2e/first_mapping.sh
 #
-# Asserts: the bridge logs "No Ready plan"; a finding is buffered; the stub mission ends; the
-# final upload_status is complete with campaignExternalId null and the first-mapping note; the
+# Asserts: the bridge logs "No Ready plan"; a finding (autoassess_bridge/Finding) is buffered;
+# the stub mission ends; the final /autoassess/upload_status_json (the JSON mirror of
+# /autoassess/upload_status) is complete with campaignExternalId null and the first-mapping note; the
 # uploaded CogniteFiles are found in CDF by their mission:<id> tag with the uidss tags and no
 # campaign lists their ids; the finding became a DefectDetection attached to the AREA.
 # CDF is only written in $TEST_AREA's scope. Any missing step exits non-zero.
@@ -53,7 +54,9 @@ if ! grep -q "No Ready plan" /tmp/bridge.log; then
 fi
 
 step publish one finding
-rostopic pub -1 /autoassess/findings std_msgs/String "data: '{\"id\": \"fm-1\", \"x\": 2.0, \"y\": 3.0, \"z\": 1.0, \"nx\": 0, \"ny\": 0, \"nz\": 1, \"class\": \"anomaly\"}'"
+rostopic pub -1 /autoassess/findings autoassess_bridge/Finding \
+  "{id: 'fm-1', position: {x: 2.0, y: 3.0, z: 1.0}, normal: {x: 0.0, y: 0.0, z: 1.0},
+    has_normal: true, defect_class: 'anomaly'}"
 sleep 3
 grep -q "Buffered 1 finding" /tmp/bridge.log || { echo "FAIL: the finding was not buffered"; exit 1; }
 
@@ -61,7 +64,7 @@ step stub gbplanner mission
 python3 /ws/src/autoassess_bridge/e2e/stub_gbplanner.py >/tmp/stub.log 2>&1 &
 STUB=$!
 
-step wait for the campaign-less upload
+step "wait for the campaign-less upload (JSON mirror: it carries the note and file details)"
 python3 - "$UPLOAD_TIMEOUT_S" <<'PY'
 import json, sys, rospy
 from std_msgs.msg import String
@@ -74,7 +77,7 @@ def on_status(msg):
     print("upload_status:", json.dumps(status), flush=True)
     if status["state"] in ("complete", "failed"):
         final = status
-rospy.Subscriber("/autoassess/upload_status", String, on_status)
+rospy.Subscriber("/autoassess/upload_status_json", String, on_status)
 while not rospy.is_shutdown() and final is None and rospy.get_time() < deadline:
     rospy.sleep(0.5)
 assert final is not None, "no terminal upload_status"

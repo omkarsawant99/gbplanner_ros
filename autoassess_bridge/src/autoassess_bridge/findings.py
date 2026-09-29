@@ -96,6 +96,20 @@ def parse_findings_json(text: str) -> Tuple[List[Finding], List[str]]:
     return findings, errors
 
 
+def parse_finding_entry(entry: Dict[str, Any]) -> Tuple[Optional[Finding], Optional[str]]:
+    """Validate one finding given as a field dict (e.g. from a Finding message).
+
+    Returns (finding, None), or (None, error) for a bad entry — the same rules as
+    `parse_findings_json` applies per entry.
+    """
+    if not isinstance(entry, dict):
+        return None, "not an object"
+    try:
+        return _parse_entry(entry), None
+    except _InvalidEntry as exc:
+        return None, str(exc)
+
+
 def _parse_entry(entry: Dict[str, Any]) -> Finding:
     row = {}
     for key in _FIELDS:

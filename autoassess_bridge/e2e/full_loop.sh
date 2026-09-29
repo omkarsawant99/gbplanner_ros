@@ -7,11 +7,13 @@
 #     -v <repo>:/src:ro -v <folder with test_mesh.ply>:/data:ro \
 #     ros:noetic-ros-base bash /src/autoassess_bridge/e2e/full_loop.sh
 #
-# It builds the package, runs pytest, starts the bridge for $TEST_AREA with uploads enabled,
-# waits for a Ready plan (mark one Ready in the UI, or set MARK_READY_CMD), asserts the plan
-# topics, publishes three findings (one with a normal, one without, one bad -> skipped),
-# runs the stub gbplanner mission, and asserts /autoassess/upload_status reaches `complete`
-# with the findings stored as DefectDetection nodes on the new campaign (read back from CDF).
+# It builds the package (message generation included), runs pytest, starts the bridge for
+# $TEST_AREA with uploads enabled, waits for a Ready plan (mark one Ready in the UI, or set
+# MARK_READY_CMD), asserts the plan topics (autoassess_bridge/InspectionPlan + the JSON mirror),
+# publishes three findings (a typed autoassess_bridge/Finding with a normal; JSON without a
+# normal; JSON bad -> skipped), runs the stub gbplanner mission, and asserts
+# /autoassess/upload_status (autoassess_bridge/UploadStatus) reaches `complete` with the
+# findings stored as DefectDetection nodes on the new campaign (read back from CDF).
 # Any missing step exits non-zero. CDF is only written in $TEST_AREA.
 set -eo pipefail
 : "${TEST_AREA:?set TEST_AREA to the e2e area externalId (the only area that will be written to)}"
@@ -58,25 +60,36 @@ fi
 step assert plan topics
 python3 - <<'PY'
 import json, rospy
+from autoassess_bridge.msg import InspectionPlan, InspectionTask
 from geometry_msgs.msg import PoseArray
 from std_msgs.msg import String
 rospy.init_node("e2e_assert_plan", anonymous=True)
-plan = json.loads(rospy.wait_for_message("/autoassess/plan", String, timeout=30).data)
+plan = rospy.wait_for_message("/autoassess/plan", InspectionPlan, timeout=30)
+assert plan.header.frame_id == "world", plan.header.frame_id
+assert plan.external_id and plan.area_external_id, plan
+for task in plan.tasks:
+    assert task.task_type in (InspectionTask.REGION, InspectionTask.ELEMENT), task
+    assert task.inspection_type in (InspectionTask.VISUAL, InspectionTask.NDT_THICKNESS), task
+plan_json = json.loads(rospy.wait_for_message("/autoassess/plan_json", String, timeout=30).data)
+assert plan_json["planExternalId"] == plan.external_id, plan_json
+assert len(plan_json["tasks"]) == len(plan.tasks), plan_json
 targets = rospy.wait_for_message("/autoassess/inspection_targets", PoseArray, timeout=30)
 assert targets.header.frame_id == "world", targets.header.frame_id
-print("plan:", plan["planExternalId"], "area:", plan["areaExternalId"],
-      "map:", plan["mapExternalId"], "tasks:", len(plan["tasks"]), "targets:", len(targets.poses))
+print("plan:", plan.external_id, "area:", plan.area_external_id,
+      "map:", plan.map_external_id, "tasks:", len(plan.tasks), "targets:", len(targets.poses))
 PY
 
-step "publish findings (one with a normal, one without, one bad)"
-rostopic pub -1 /autoassess/findings std_msgs/String "data: '[
-  {\"id\": \"e2e-norm\", \"x\": 1.0, \"y\": 2.0, \"z\": 1.5, \"nx\": 0, \"ny\": 0, \"nz\": 1, \"class\": \"corrosion\", \"confidence\": 0.9},
+step "publish findings (typed with a normal; JSON without; JSON bad)"
+rostopic pub -1 /autoassess/findings autoassess_bridge/Finding \
+  "{id: 'e2e-norm', position: {x: 1.0, y: 2.0, z: 1.5}, normal: {x: 0.0, y: 0.0, z: 1.0},
+    has_normal: true, defect_class: 'corrosion', confidence: 0.9}"
+rostopic pub -1 /autoassess/findings_json std_msgs/String "data: '[
   {\"id\": \"e2e-nonorm\", \"x\": 4.0, \"y\": 5.0, \"z\": 1.0},
   {\"id\": \"e2e-bad\", \"y\": 1.0, \"z\": 1.0}
 ]'"
 sleep 5
 grep -q "Bad finding skipped" /tmp/bridge.log || { echo "FAIL: bad finding was not reported"; exit 1; }
-grep -q "Buffered 2 finding" /tmp/bridge.log || { echo "FAIL: 2 good findings were not buffered"; exit 1; }
+grep -q "2 in total" /tmp/bridge.log || { echo "FAIL: 2 good findings were not buffered"; exit 1; }
 
 step stub gbplanner mission
 python3 /ws/src/autoassess_bridge/e2e/stub_gbplanner.py >/tmp/stub.log 2>&1 &
@@ -85,29 +98,35 @@ STUB=$!
 step wait for upload complete with defects on the campaign
 python3 - "$UPLOAD_TIMEOUT_S" <<'PY'
 import json, sys, rospy
+from autoassess_bridge.msg import UploadStatus
 from std_msgs.msg import String
 rospy.init_node("e2e_assert_upload", anonymous=True)
 deadline = rospy.get_time() + float(sys.argv[1])
 final = None
 def on_status(msg):
     global final
-    status = json.loads(msg.data)
-    print("upload_status:", json.dumps(status), flush=True)
-    if status["state"] in ("complete", "failed"):
-        final = status
-rospy.Subscriber("/autoassess/upload_status", String, on_status)
+    print("upload_status:", msg.state, msg.mission_id, msg.campaign_external_id,
+          "files {}/{}".format(msg.files_done, msg.files_total),
+          "findings", msg.findings_count, msg.message, flush=True)
+    if msg.state in (UploadStatus.COMPLETE, UploadStatus.FAILED):
+        final = msg
+rospy.Subscriber("/autoassess/upload_status", UploadStatus, on_status)
 while not rospy.is_shutdown() and final is None and rospy.get_time() < deadline:
     rospy.sleep(0.5)
 assert final is not None, "no terminal upload_status"
-assert final["state"] == "complete", final
-findings = final["findings"]
-assert findings and findings["count"] == 2, final
-ids = findings["defectExternalIds"]
+assert final.state == UploadStatus.COMPLETE, final
+assert final.files_done == final.files_total and final.files_done >= 1, final
+assert final.findings_count == 2, final
+ids = list(final.defect_external_ids)
 assert len(ids) == 2 and all(i.startswith("defect-") for i in ids), final
-print("CAMPAIGN:", final["campaignExternalId"])
+mirror = json.loads(rospy.wait_for_message("/autoassess/upload_status_json", String, timeout=10).data)
+assert mirror["state"] == "complete", mirror
+assert mirror["campaignExternalId"] == final.campaign_external_id, mirror
+assert sorted(mirror["findings"]["defectExternalIds"]) == sorted(ids), mirror
+print("CAMPAIGN:", final.campaign_external_id)
 print("DEFECTS:", " ".join(ids))
 with open("/tmp/e2e_result.env", "w") as fh:
-    fh.write("CAMPAIGN={}\nDEFECTS={}\n".format(final["campaignExternalId"], ",".join(ids)))
+    fh.write("CAMPAIGN={}\nDEFECTS={}\n".format(final.campaign_external_id, ",".join(ids)))
 PY
 
 step read the defects back from CDF

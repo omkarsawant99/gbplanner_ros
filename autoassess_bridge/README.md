@@ -3,8 +3,9 @@
 A small ROS 1 (Noetic) node that connects gbplanner to AutoAssess, which stores its data in
 Cognite Data Fusion (CDF). It does three things:
 
-1. It follows the newest **Ready** inspection plan in the CDF project and publishes it: the plan JSON,
-   inspection target poses, and the plan id. It can also set gbplanner's global bound.
+1. It follows the newest **Ready** inspection plan in the CDF project and publishes it: the plan
+   (typed message + verbatim plan JSON), inspection target poses, and the plan id. It can also
+   set gbplanner's global bound.
 2. It publishes the plan's **reference map** as a latched point cloud on
    `/ballast_tank/pointcloud`. You no longer need to download the map and run `pcd_to_pointcloud`.
 3. Optionally, it **uploads the finished mission** (mesh and point clouds) as a new AutoAssess
@@ -14,6 +15,20 @@ Cognite Data Fusion (CDF). It does three things:
 By default the node only reads from CDF (`instances.list` / `instances.retrieve`, file
 downloads). With `~upload_enabled: true` it also writes the mission upload
 ([Mission upload](#mission-upload)); nothing else is ever written.
+
+> **Breaking change (hard cut, no deprecation period):** the JSON-over-`std_msgs/String`
+> interfaces were replaced by proper `autoassess_bridge/*` message types, defined and
+> documented in [`msg/`](msg/):
+>
+> | Interface | Before | Now |
+> | --- | --- | --- |
+> | `/autoassess/plan` | `std_msgs/String` (plan.json text) | `autoassess_bridge/InspectionPlan`; the verbatim plan.json text moved to `/autoassess/plan_json` (`std_msgs/String`, latched) |
+> | `/autoassess/findings` | `std_msgs/String` (JSON in) | `autoassess_bridge/Finding` (one finding per message); the JSON subscription lives on at `/autoassess/findings_json` — both feed the same buffer |
+> | `/autoassess/upload_status` | `std_msgs/String` (JSON, latched) | `autoassess_bridge/UploadStatus` (latched); full JSON mirror at `/autoassess/upload_status_json` (latched) |
+>
+> `/autoassess/inspection_targets` and `/autoassess/plan_id` are unchanged. Publishers or
+> subscribers still using `std_msgs/String` on the renamed topics must switch to the typed
+> messages or move to the `*_json` topics.
 
 ## Typical setup
 
@@ -77,12 +92,14 @@ plan, possibly in another area, or edited tasks), it publishes:
 
 | Topic | Type | Content |
 | --- | --- | --- |
-| `/autoassess/plan` | `std_msgs/String` | the plan JSON, the same text `dss plan download` writes to `plan.json` |
+| `/autoassess/plan` | [`autoassess_bridge/InspectionPlan`](msg/InspectionPlan.msg) | the typed plan: `external_id`, `name`, `area_external_id`, `map_external_id`, and one [`InspectionTask`](msg/InspectionTask.msg) per task (`id`, `task_type` REGION/ELEMENT, `inspection_type` VISUAL/NDT_THICKNESS, `position`, `normal` + `has_normal`, `radius_m`, `target_element_id`) |
+| `/autoassess/plan_json` | `std_msgs/String` | the verbatim plan JSON, the same text `dss plan download` writes to `plan.json` (full fidelity: fields not modelled in the message) |
 | `/autoassess/inspection_targets` | `geometry_msgs/PoseArray` | one inspection pose per task, in task order, in `~frame_id` |
 | `/autoassess/plan_id` | `std_msgs/String` | the plan's externalId |
 
-All three are latched, so late subscribers get the current plan. Tasks without a target point are
-left out of the PoseArray (and logged); the full list stays in `/autoassess/plan`. If there is no
+All four are latched, so late subscribers get the current plan. Tasks without a target point are
+left out of the PoseArray (and logged); they stay in `/autoassess/plan` (with position (0,0,0))
+and in `/autoassess/plan_json`. If there is no
 Ready plan, the node logs "No Ready plan (filter: …)" once and waits. When the newest Ready
 plan moves to another area, the plan, targets and map are republished and the bound is resent.
 
@@ -124,8 +141,22 @@ goes out as a latched `sensor_msgs/PointCloud2` on `~map_topic` (default
 
 ## Findings from the robot
 
-The detection stack reports findings by publishing JSON on `/autoassess/findings`
-(`std_msgs/String`) — one object, or an array of objects:
+The detection stack reports findings by publishing
+[`autoassess_bridge/Finding`](msg/Finding.msg) on `/autoassess/findings` — one finding per
+message:
+
+| field | meaning |
+| --- | --- |
+| `position` (required) | `geometry_msgs/Point`, metres, in the reference map's frame (`world`) |
+| `id` | stable finding id; `""`: a hash of the values. Repeats are deduped |
+| `normal`, `has_normal` | surface normal (`geometry_msgs/Vector3`); only read when `has_normal` |
+| `radius_m` | task radius in metres; `0` = default (0.3) |
+| `inspection_type` | `VISUAL` (default, `""`) or `NDT_THICKNESS` |
+| `defect_class`, `confidence`, `description` | optional metadata (`confidence` (0..1]; `0` = not given) |
+
+The JSON interface stays available on `/autoassess/findings_json` (`std_msgs/String`) for
+scripts and the sandbox twin — one object, or an array of objects, with the same fields as the
+AutoAssess findings CSV (`dss plan import-findings`); both topics feed the same buffer:
 
 ```json
 {
@@ -140,16 +171,7 @@ The detection stack reports findings by publishing JSON on `/autoassess/findings
 }
 ```
 
-| field | meaning |
-| --- | --- |
-| `x, y, z` (required) | position in metres, in the reference map's frame (`world`) |
-| `id` | stable finding id; default: a hash of the values. Repeats are deduped |
-| `nx, ny, nz` | surface normal (all three or none) |
-| `radius` | task radius in metres (default 0.3) |
-| `inspection_type` | `visual` (default) or `ndt_thickness` |
-| `class`, `confidence`, `description` | optional metadata (`confidence` 0..1) |
-
-Bad entries are logged (once per distinct error) and skipped; good ones are buffered for the
+Bad findings (on either topic) are logged (once per distinct error) and skipped; good ones are buffered for the
 current mission. At mission end — after the upload, in the same step — each buffered finding
 becomes a **DefectDetection** node on the just-created campaign (findings closer than
 `~findings_merge_radius_m`, 0.5 m, merge into one defect):
@@ -161,12 +183,13 @@ becomes a **DefectDetection** node on the just-created campaign (findings closer
 - `status: New`, `source: ml`, external id `defect-<missionId>-<hash>` (deterministic, so
   retries never duplicate).
 
-The final `/autoassess/upload_status` then has
-`findings: {"count": …, "defectExternalIds": […]}`. The review path is the viewer's
+The final `/autoassess/upload_status` then carries `findings_count` and
+`defect_external_ids` (JSON mirror: `findings: {"count": …, "defectExternalIds": […]}`).
+The review path is the viewer's
 **Defects tab**: Confirm a defect → it appears under Suggestions → add it to a plan as a
 task. No plan is created automatically.
 
-- The topic is always subscribed. With `~upload_enabled: false` the node warns that no
+- Both findings topics are always subscribed. With `~upload_enabled: false` the node warns that no
   defects will be stored.
 - If storing the defects fails, the findings are kept; `~submit_findings`
   (`std_srvs/Trigger`) retries just the defects. Re-detections in a *later* mission
@@ -203,9 +226,9 @@ already uploaded are skipped. Nothing that already exists in CDF is changed or d
 **First mapping (no plan yet).** A brand-new area has no Ready plan to follow. Set
 `~area_external_id` and explore anyway: at mission end the upload proceeds **without a
 campaign** — the mesh and `~mission_dir` files land as plain CogniteFiles tagged
-`area:<id>` and `mission:<id>` (no `plan:` tag), and `/autoassess/upload_status` says
-`campaignExternalId: null` with the note "no plan followed: uploaded without a campaign
-(first mapping)". The `dss worker` builds their 3D models as usual; group the files into a
+`area:<id>` and `mission:<id>` (no `plan:` tag), `/autoassess/upload_status` has
+`campaign_external_id: ""`, and its JSON mirror says `campaignExternalId: null` with the note
+"no plan followed: uploaded without a campaign (first mapping)". The `dss worker` builds their 3D models as usual; group the files into a
 campaign in the viewer afterwards ("New campaign from files"). Findings from such a mission
 become defects attached to the **area** instead of a campaign. Without a configured
 `~area_external_id` (and no plan followed) the upload still fails with a clear message.
@@ -221,10 +244,22 @@ Triggers:
   - `odometry` is a `nav_msgs/Odometry` topic: remap it, or pass `odometry_topic:=` to the
     launch file.
 
-Progress is published, latched, as JSON on `/autoassess/upload_status` (`std_msgs/String`):
-`state` (`idle`, `exporting_mesh`, `uploading`, `complete`, `failed`), `missionId`,
-`areaExternalId`, `planExternalId`, `campaignExternalId`, `cdfFileIds`, `pcdFileIds`,
-`pcdFileLabels`, `failedFiles`, `skippedFiles`, `message`, `updatedAt`.
+Progress is published, latched, on `/autoassess/upload_status`
+([`autoassess_bridge/UploadStatus`](msg/UploadStatus.msg)):
+
+| field | meaning |
+| --- | --- |
+| `state` | `IDLE`, `EXPORTING_MESH`, `UPLOADING`, `COMPLETE` or `FAILED` (constants on the message) |
+| `mission_id` | `mission-<UTC start time>`; `""` before the first upload |
+| `campaign_external_id` | the created campaign; `""` while none exists and on a campaign-less first-mapping upload |
+| `files_done`, `files_total` | files uploaded so far / attempted (done + failed) |
+| `findings_count`, `defect_external_ids` | the DefectDetection nodes stored at mission end (final status only) |
+| `message` | human-readable progress / error text |
+
+The full JSON status is mirrored, latched, on `/autoassess/upload_status_json`
+(`std_msgs/String`): `state`, `missionId`, `areaExternalId`, `planExternalId`,
+`campaignExternalId`, `cdfFileIds`, `pcdFileIds`, `pcdFileLabels`, `failedFiles`,
+`skippedFiles`, `findings`, `note`, `message`, `updatedAt`.
 
 ## Parameters
 
@@ -331,6 +366,7 @@ The logic lives in the ROS-free package `src/autoassess_bridge`. Only
 | `bound.py` | global-bound retries |
 | `map.py` | reference map |
 | `findings.py` | findings parsing, buffer, merging, task planning |
+| `messages.py` | internal dicts <-> `msg/` message conversions (message classes injected) |
 | `upload.py` | mission upload |
 | `mission_end.py` | mission-end detection |
 
