@@ -22,12 +22,15 @@
   <arg name="worker_command"
        default="$(arg uv) run --project $(arg uidss_dir) dss worker --area $(arg area_external_id) --poll $(arg worker_poll_s)" />
   <arg name="config" default="$(find autoassess_bridge)/config/autoassess_bridge.yaml" />
+  <!-- The worker uses exported COGNITE_* variables, so the bridge uses them too by default. -->
+  <arg name="credentials_file" default="" />
   <arg name="odometry_topic" default="odometry" />
 
   <include file="$(find autoassess_bridge)/launch/autoassess_bridge.launch">
     <arg name="area_external_id" value="$(arg area_external_id)" />
     <arg name="vessel_external_id" value="$(arg vessel_external_id)" />
     <arg name="config" value="$(arg config)" />
+    <arg name="credentials_file" value="$(arg credentials_file)" />
     <arg name="odometry_topic" value="$(arg odometry_topic)" />
   </include>
 

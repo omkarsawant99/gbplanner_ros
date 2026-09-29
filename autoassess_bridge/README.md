@@ -22,8 +22,7 @@ downloads). With `~upload_enabled: true` it also writes the mission upload
 pip3 install -r autoassess_bridge/requirements.txt
 catkin build autoassess_bridge            # or catkin_make; needs planner_msgs
 
-# 2. Credentials: environment only; keep them in a file you never commit
-export COGNITE_PROJECT=... COGNITE_CLUSTER=... COGNITE_TENANT_ID=... COGNITE_CLIENT_ID=... COGNITE_CLIENT_SECRET=...
+# 2. Put credentials in sdk/.env at the workspace root (see Credentials below)
 
 # 3. Start the bridge next to gbplanner
 roslaunch autoassess_bridge autoassess_bridge.launch
@@ -244,6 +243,9 @@ roslaunch, so one launch gives the whole loop:
 roslaunch autoassess_bridge autoassess_full.launch     area_external_id:=area-XXXX uidss_dir:=/path/to/autoassess-sdk
 ```
 
+The full launch uses exported CDF credentials for both processes. Set `credentials_file:=/path/to/.env`
+only when the worker receives the same credentials through its environment.
+
 - `area_external_id` is **mandatory** here: the worker only builds models for that area's
   meshes (`scripts/worker_node` refuses a command without `--area`, because an unfiltered
   worker would build for the whole CDF project).
@@ -282,9 +284,12 @@ dss worker --area area-XXXX --poll 30` — the worker only needs CDF, not ROS.
 
 ## Credentials
 
-Credentials are read only from the environment of the process that starts the node, never from
-ROS parameters or files: `COGNITE_PROJECT`, `COGNITE_CLUSTER`, `COGNITE_TENANT_ID`,
-`COGNITE_CLIENT_ID`, `COGNITE_CLIENT_SECRET` (OAuth client credentials).
+The standalone bridge launch loads `sdk/.env` from the workspace root into the bridge process by default.
+Override its path with `credentials_file:=/path/to/.env`, or set `credentials_file:=` to
+use variables already exported in the process environment. The file needs `COGNITE_PROJECT`,
+`COGNITE_CLUSTER`, `COGNITE_TENANT_ID`, `COGNITE_CLIENT_ID`, and
+`COGNITE_CLIENT_SECRET` as `KEY=VALUE` lines. The values stay in the bridge process; they are
+not published as ROS parameters.
 
 - A UUID tenant uses Azure AD (`login.microsoftonline.com/<tenant>`, scope
   `https://<cluster>.cognitedata.com/.default`). Any other value uses the Cognite IdP
@@ -292,15 +297,18 @@ ROS parameters or files: `COGNITE_PROJECT`, `COGNITE_CLUSTER`, `COGNITE_TENANT_I
 - The client needs read access to the AutoAssess data-model space and to files (for the map).
 - Uploads also need `files:write` and `dataModelInstances:write` on the AutoAssess space.
 
-**Using a `.env` file:** copy [`.env.example`](.env.example) to `autoassess_bridge/.env` (git-ignored) and fill in the values, then load it in the shell that launches the node:
+**Using a `.env` file:** create `sdk/.env` at the workspace root with the five keys above.
+Alternatively, copy [`.env.example`](.env.example) to `autoassess_bridge/.env` (git-ignored)
+and pass that file with `credentials_file:=`:
 
 ```bash
 cp autoassess_bridge/.env.example autoassess_bridge/.env   # once; edit the values
-set -a; source autoassess_bridge/.env; set +a
-roslaunch autoassess_bridge autoassess_bridge.launch
+roslaunch autoassess_bridge autoassess_bridge.launch \
+  credentials_file:=/path/to/autoassess_bridge/.env
 ```
 
-With Docker, pass it with `docker run --env-file autoassess_bridge/.env …`. Never commit `.env`.
+With Docker, pass it with `docker run --env-file autoassess_bridge/.env …` and set
+`credentials_file:=` to use the exported variables. Never commit `.env`.
 
 A missing variable stops the node with a clear message.
 

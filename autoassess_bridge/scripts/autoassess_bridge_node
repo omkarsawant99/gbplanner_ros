@@ -39,6 +39,7 @@ from std_srvs.srv import Empty, Trigger, TriggerResponse
 
 from autoassess_bridge import cdf
 from autoassess_bridge.bound import GlobalBoundSetter, ServiceUnavailable
+from autoassess_bridge.env_file import load_credentials
 from autoassess_bridge.findings import FindingsBuffer, parse_findings_json
 from autoassess_bridge.map import DEFAULT_CACHE_DIR, MapSource, MapUpdater
 from autoassess_bridge.mission_end import MissionEndDetector
@@ -294,8 +295,11 @@ def main():
     space = rospy.get_param("~space", cdf.SPACE)
 
     try:
+        credentials_file = rospy.get_param("~credentials_file", "")
+        if credentials_file:
+            load_credentials(credentials_file, os.environ)
         client = cdf.make_client(os.environ)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         rospy.logfatal(str(exc))
         return 1
 
