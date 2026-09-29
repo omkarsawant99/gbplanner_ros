@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from conftest import SPACE, FakeClient, FakeNode
+from conftest import SPACE, FakeClient, FakeNode, RecordingLog
 
 from autoassess_bridge import cdf
 
@@ -16,7 +16,12 @@ TASK_VIEW = ("InspectionTaskView", "1")
 ELEMENT_VIEW = ("StructuralElementView", "1")
 AREA_VIEW = ("AreaView", "4")
 VESSEL_VIEW = ("VesselView", "2")
-_READY = {"equals": {"property": [SPACE, "InspectionPlanContainer", "status"], "value": "Ready"}}
+_ACTIVE_OR_READY = {
+    "in": {
+        "property": [SPACE, "InspectionPlanContainer", "status"],
+        "values": ["Active", "Ready"],
+    }
+}
 _NOT_DELETED = {"not": {"exists": {"property": [SPACE, "InspectionPlanContainer", "deletedAt"]}}}
 FIXED_NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
@@ -66,28 +71,28 @@ def test_make_client_names_every_missing_variable() -> None:
     assert "COGNITE_CLUSTER" not in str(excinfo.value)
 
 
-def test_latest_ready_plan_filters_on_ready_and_not_deleted_in_the_whole_project() -> None:
+def test_plan_to_follow_filters_on_active_or_ready_and_not_deleted_in_the_whole_project() -> None:
     client = FakeClient()
 
-    cdf.PlanSource(client).latest_ready_plan()
+    cdf.PlanSource(client).plan_to_follow()
 
     (call,) = client.instances.calls_to("list")
     assert call["instance_type"] == "node"
     assert call["sources"][0].external_id == "InspectionPlanView"
     assert call["sources"][0].version == "4"
     assert call["limit"] is None
-    assert call["filter"] == {"and": [_READY, _NOT_DELETED]}
+    assert call["filter"] == {"and": [_ACTIVE_OR_READY, _NOT_DELETED]}
 
 
-def test_latest_ready_plan_can_filter_on_one_area() -> None:
+def test_plan_to_follow_can_filter_on_one_area() -> None:
     client = FakeClient()
 
-    cdf.PlanSource(client).latest_ready_plan(area_external_id="area-1")
+    cdf.PlanSource(client).plan_to_follow(area_external_id="area-1")
 
     (call,) = client.instances.calls_to("list")
     assert call["filter"] == {
         "and": [
-            _READY,
+            _ACTIVE_OR_READY,
             _NOT_DELETED,
             {
                 "equals": {
@@ -99,12 +104,12 @@ def test_latest_ready_plan_can_filter_on_one_area() -> None:
     }
 
 
-def test_latest_ready_plan_can_filter_on_the_areas_of_a_vessel() -> None:
+def test_plan_to_follow_can_filter_on_the_areas_of_a_vessel() -> None:
     client = FakeClient()
     client.instances.add(AREA_VIEW, FakeNode("area-1", AREA_VIEW, {"name": "Tank 1"}))
     client.instances.add(AREA_VIEW, FakeNode("area-2", AREA_VIEW, {"name": "Tank 2"}))
 
-    cdf.PlanSource(client).latest_ready_plan(vessel_external_id="vessel-1")
+    cdf.PlanSource(client).plan_to_follow(vessel_external_id="vessel-1")
 
     area_call, plan_call = client.instances.calls_to("list")
     assert area_call["sources"][0].external_id == "AreaView"
@@ -130,26 +135,26 @@ def test_latest_ready_plan_can_filter_on_the_areas_of_a_vessel() -> None:
     }
 
 
-def test_latest_ready_plan_of_a_vessel_without_areas_is_none() -> None:
+def test_plan_to_follow_of_a_vessel_without_areas_is_none() -> None:
     client = FakeClient()
     client.instances.add(PLAN_VIEW, _plan_node("p-1"))
 
-    assert cdf.PlanSource(client).latest_ready_plan(vessel_external_id="vessel-1") is None
+    assert cdf.PlanSource(client).plan_to_follow(vessel_external_id="vessel-1") is None
     assert len(client.instances.calls_to("list")) == 1
 
 
-def test_latest_ready_plan_combines_vessel_and_area_filters() -> None:
+def test_plan_to_follow_combines_vessel_and_area_filters() -> None:
     client = FakeClient()
     client.instances.add(AREA_VIEW, FakeNode("area-1", AREA_VIEW, {}))
 
-    cdf.PlanSource(client).latest_ready_plan(area_external_id="area-1", vessel_external_id="vessel-1")
+    cdf.PlanSource(client).plan_to_follow(area_external_id="area-1", vessel_external_id="vessel-1")
 
     plan_call = client.instances.calls_to("list")[-1]
-    assert [list(f)[0] for f in plan_call["filter"]["and"]] == ["equals", "not", "equals", "in"]
+    assert [list(f)[0] for f in plan_call["filter"]["and"]] == ["in", "not", "equals", "in"]
 
 
 def test_the_bridges_own_draft_findings_plan_is_never_followed() -> None:
-    # The bridge creates Draft findings plans at mission end; the Ready filter must keep it
+    # The bridge creates Draft findings plans at mission end; the status filter must keep it
     # from re-following its own output even when that plan is the newest one.
     client = FakeClient()
     client.instances.add(PLAN_VIEW, _plan_node("p-flown", created=1, updated=10))
@@ -157,49 +162,99 @@ def test_the_bridges_own_draft_findings_plan_is_never_followed() -> None:
         PLAN_VIEW, _plan_node("plan-findings", status="Draft", created=99, updated=99)
     )
 
-    plan = cdf.PlanSource(client).latest_ready_plan()
+    plan = cdf.PlanSource(client).plan_to_follow()
 
     assert plan is not None
     assert plan.external_id == "p-flown"
 
 
-def test_latest_ready_plan_returns_none_without_ready_plans() -> None:
+def test_plan_to_follow_returns_none_without_active_or_ready_plans() -> None:
     client = FakeClient()
     client.instances.add(PLAN_VIEW, _plan_node("p-draft", status="Draft"))
+    client.instances.add(PLAN_VIEW, _plan_node("p-complete", status="Complete"))
     client.instances.add(PLAN_VIEW, _plan_node("p-bad", status="Bogus"))
 
-    assert cdf.PlanSource(client).latest_ready_plan() is None
+    assert cdf.PlanSource(client).plan_to_follow() is None
 
 
-def test_latest_ready_plan_picks_most_recently_updated_ready_plan() -> None:
+def test_an_active_plan_beats_a_newer_ready_plan() -> None:
+    client = FakeClient()
+    client.instances.add(PLAN_VIEW, _plan_node("p-active", status="Active", created=1, updated=10))
+    client.instances.add(PLAN_VIEW, _plan_node("p-ready", created=2, updated=99))
+
+    plan = cdf.PlanSource(client).plan_to_follow()
+
+    assert plan is not None
+    assert plan.external_id == "p-active"
+
+
+def test_a_single_active_plan_logs_no_warning() -> None:
+    client = FakeClient()
+    client.instances.add(PLAN_VIEW, _plan_node("p-active", status="Active"))
+    log = RecordingLog()
+
+    cdf.PlanSource(client, log=log).plan_to_follow()
+
+    assert log.messages("warning") == []
+
+
+def test_multiple_active_plans_warn_naming_them_all_and_the_newest_wins() -> None:
+    client = FakeClient()
+    client.instances.add(PLAN_VIEW, _plan_node("p-act-old", status="Active", created=1, updated=10))
+    client.instances.add(PLAN_VIEW, _plan_node("p-act-new", status="Active", created=2, updated=30))
+    client.instances.add(PLAN_VIEW, _plan_node("p-ready", created=3, updated=99))
+    log = RecordingLog()
+
+    plan = cdf.PlanSource(client, log=log).plan_to_follow()
+
+    assert plan is not None
+    assert plan.external_id == "p-act-new"
+    (warning,) = log.messages("warning")
+    assert "p-act-old" in warning
+    assert "p-act-new" in warning
+
+
+def test_draft_and_complete_plans_are_never_followed_even_when_newest() -> None:
+    client = FakeClient()
+    client.instances.add(PLAN_VIEW, _plan_node("p-active", status="Active", created=1, updated=1))
+    client.instances.add(PLAN_VIEW, _plan_node("p-draft", status="Draft", created=2, updated=98))
+    client.instances.add(PLAN_VIEW, _plan_node("p-done", status="Complete", created=3, updated=99))
+
+    plan = cdf.PlanSource(client).plan_to_follow()
+
+    assert plan is not None
+    assert plan.external_id == "p-active"
+
+
+def test_without_an_active_plan_the_most_recently_updated_ready_plan_is_followed() -> None:
     client = FakeClient()
     client.instances.add(PLAN_VIEW, _plan_node("p-old", created=1, updated=10))
     client.instances.add(PLAN_VIEW, _plan_node("p-new", created=2, updated=30))
     client.instances.add(PLAN_VIEW, _plan_node("p-mid", created=3, updated=20))
     client.instances.add(PLAN_VIEW, _plan_node("p-draft", status="Draft", created=4, updated=99))
 
-    plan = cdf.PlanSource(client).latest_ready_plan()
+    plan = cdf.PlanSource(client).plan_to_follow()
 
     assert plan is not None
     assert plan.external_id == "p-new"
 
 
-def test_latest_ready_plan_breaks_update_ties_by_creation_time() -> None:
+def test_plan_to_follow_breaks_update_ties_by_creation_time() -> None:
     client = FakeClient()
     client.instances.add(PLAN_VIEW, _plan_node("p-a", created=5, updated=10))
     client.instances.add(PLAN_VIEW, _plan_node("p-b", created=7, updated=10))
 
-    plan = cdf.PlanSource(client).latest_ready_plan()
+    plan = cdf.PlanSource(client).plan_to_follow()
 
     assert plan is not None
     assert plan.external_id == "p-b"
 
 
-def test_latest_ready_plan_maps_plan_fields() -> None:
+def test_plan_to_follow_maps_plan_fields() -> None:
     client = FakeClient()
     client.instances.add(PLAN_VIEW, _plan_node("p-1", name="", description="desc", map_id=None))
 
-    plan = cdf.PlanSource(client).latest_ready_plan()
+    plan = cdf.PlanSource(client).plan_to_follow()
 
     assert plan == cdf.Plan(
         space=SPACE,
@@ -413,7 +468,7 @@ def test_element_centres_skips_elements_without_a_full_centre() -> None:
 def test_plan_source_uses_configured_space() -> None:
     client = FakeClient()
 
-    cdf.PlanSource(client, space="other").latest_ready_plan(area_external_id="area-1")
+    cdf.PlanSource(client, space="other").plan_to_follow(area_external_id="area-1")
 
     (call,) = client.instances.calls_to("list")
     assert call["sources"][0].space == "other"

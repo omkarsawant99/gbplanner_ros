@@ -3,9 +3,9 @@
 A small ROS 1 (Noetic) node that connects gbplanner to AutoAssess, which stores its data in
 Cognite Data Fusion (CDF). It does three things:
 
-1. It follows the newest **Ready** inspection plan in the CDF project and publishes it: the plan
-   (typed message + verbatim plan JSON), inspection target poses, and the plan id. It can also
-   set gbplanner's global bound.
+1. It follows the CDF project's **Active** inspection plan — or, when none is Active, the
+   newest edited **Ready** plan — and publishes it: the plan (typed message + verbatim plan
+   JSON), inspection target poses, and the plan id. It can also set gbplanner's global bound.
 2. It publishes the plan's **reference map** as a latched point cloud on
    `/ballast_tank/pointcloud`. You no longer need to download the map and run `pcd_to_pointcloud`.
 3. Optionally, it **uploads the finished mission** (mesh and point clouds) as a new AutoAssess
@@ -50,11 +50,18 @@ To install its dependencies there for the ROS node's `/usr/bin/python3` interpre
 `python3 -m pip install --target sdk/.python-deps -r src/exploration/gbplanner_ros/autoassess_bridge/requirements.txt`
 from the workspace root. Pass `python_deps_dir:=/path/to/packages` if you use another location.
 
-- **Which plan.** No area id is needed. The bridge follows the newest Ready plan of the whole
-  project, and that plan's area drives the global bound, the reference map and the upload area.
-  Marking any plan Ready in AutoAssess switches the robot to it. To stay on one vessel or one
-  area, pass `vessel_external_id:=vessel-…` and/or `area_external_id:=area-…` to the launch file
-  (or set them in the yaml).
+- **Which plan.** No area id is needed. The bridge picks, in this order:
+
+  1. the plan with status **Active** — the explicit "fly this one" flag set in the AutoAssess
+     viewer (at most one per area). Should several plans be Active anyway, the bridge logs a
+     warning naming them all and follows the most recently updated one;
+  2. otherwise the newest edited **Ready** plan (newest by last update, then creation time).
+
+  Draft and Complete plans are never followed. The followed plan's area drives the global
+  bound, the reference map and the upload area. Marking a plan Active in AutoAssess switches
+  the robot to it (as does marking one Ready while no plan is Active). To stay on one vessel
+  or one area, pass `vessel_external_id:=vessel-…` and/or `area_external_id:=area-…` to the
+  launch file (or set them in the yaml).
 
 - **gbplanner's reference map.** Keep `/ballast_tank/pointcloud` as the map topic in the
   gbplanner launch file. The bridge publishes the plan's map there, latched, in frame `world`,
@@ -83,12 +90,14 @@ rostopic echo -n1 /ballast_tank/pointcloud --noarr      # the reference map (fra
 
 ## Plan topics
 
-Every `~poll_period_s` the node looks up the newest non-deleted plan with status `Ready`
-(newest by last update, then creation time). It searches the whole project, or only
-`~vessel_external_id`'s areas and/or `~area_external_id` when set. The plan's area is taken from
-the plan (`areaExternalId` / `areaName` in the plan JSON). Each switch is logged as
-"Following plan <id> '<name>' in <vessel>/<area>". When that plan's content changes (a different
-plan, possibly in another area, or edited tasks), it publishes:
+Every `~poll_period_s` the node looks up the non-deleted plan to follow: the plan with status
+`Active`, else the newest plan with status `Ready` (newest by last update, then creation time —
+see "Which plan" above). It searches the whole project, or only `~vessel_external_id`'s areas
+and/or `~area_external_id` when set. The plan's area is taken from the plan (`areaExternalId` /
+`areaName` in the plan JSON). Each switch is logged as "Following plan <id> '<name>' in
+<vessel>/<area> (Active)" — or "(newest Ready — no Active plan set)" for the fallback. When
+that plan's content changes (a different plan, possibly in another area, or edited tasks), it
+publishes:
 
 | Topic | Type | Content |
 | --- | --- | --- |
@@ -100,8 +109,9 @@ plan, possibly in another area, or edited tasks), it publishes:
 All four are latched, so late subscribers get the current plan. Tasks without a target point are
 left out of the PoseArray (and logged); they stay in `/autoassess/plan` (with position (0,0,0))
 and in `/autoassess/plan_json`. If there is no
-Ready plan, the node logs "No Ready plan (filter: …)" once and waits. When the newest Ready
-plan moves to another area, the plan, targets and map are republished and the bound is resent.
+Active or Ready plan, the node logs "No Active or Ready plan (filter: …)" once and waits. When
+the followed plan moves to another area, the plan, targets and map are republished and the
+bound is resent.
 
 **Inspection poses.**
 - Region tasks: `standoff_m` out from `position3d`, along `normalVector`.
@@ -223,7 +233,7 @@ These are the same conventions as `dss campaign upload`. If a file fails, the ca
 `InProgress`. Calling `~upload_mission` again resumes the same mission: same campaign, and files
 already uploaded are skipped. Nothing that already exists in CDF is changed or deleted.
 
-**First mapping (no plan yet).** A brand-new area has no Ready plan to follow. Set
+**First mapping (no plan yet).** A brand-new area has no Active or Ready plan to follow. Set
 `~area_external_id` and explore anyway: at mission end the upload proceeds **without a
 campaign** — the mesh and `~mission_dir` files land as plain CogniteFiles tagged
 `area:<id>` and `mission:<id>` (no `plan:` tag), `/autoassess/upload_status` has

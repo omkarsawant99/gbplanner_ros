@@ -65,9 +65,19 @@ def test_following_a_plan_is_logged_with_vessel_and_area() -> None:
 
     following = [m for m in log.messages("info") if m.startswith("Following plan")]
     assert following == [
-        "Following plan p-1 'Plan p-1' in Carrier/Tank 1",
-        "Following plan p-2 'Plan p-2' in Carrier/Tank 1",
+        "Following plan p-1 'Plan p-1' in Carrier/Tank 1 (newest Ready — no Active plan set)",
+        "Following plan p-2 'Plan p-2' in Carrier/Tank 1 (newest Ready — no Active plan set)",
     ]
+
+
+def test_following_an_active_plan_is_marked_active() -> None:
+    source = StubSource()
+    source.plan_status = "Active"
+    log = RecordingLog()
+
+    PlanPoller(source, log).poll()
+
+    assert "Following plan p-1 'Plan p-1' in Carrier/Tank 1 (Active)" in log.messages("info")
 
 
 def test_following_an_unnamed_plan_says_so() -> None:
@@ -77,10 +87,13 @@ def test_following_an_unnamed_plan_says_so() -> None:
 
     PlanPoller(source, log).poll()
 
-    assert "Following plan p-1 (no name) in Carrier/Tank 1" in log.messages("info")
+    assert (
+        "Following plan p-1 (no name) in Carrier/Tank 1 (newest Ready — no Active plan set)"
+        in log.messages("info")
+    )
 
 
-def test_no_ready_plan_message_names_the_filter() -> None:
+def test_no_plan_message_names_both_statuses_and_the_filter() -> None:
     source = StubSource()
     source.plan_id = None
     log = RecordingLog()
@@ -88,9 +101,9 @@ def test_no_ready_plan_message_names_the_filter() -> None:
     PlanPoller(source, log).poll()
     PlanPoller(source, log, area_external_id="area-9", vessel_external_id="v-9").poll()
 
-    assert [m for m in log.messages("info") if "No Ready plan" in m] == [
-        "No Ready plan (filter: whole project) yet",
-        "No Ready plan (filter: vessel v-9, area area-9) yet",
+    assert [m for m in log.messages("info") if "No Active or Ready plan" in m] == [
+        "No Active or Ready plan (filter: whole project) yet",
+        "No Active or Ready plan (filter: vessel v-9, area area-9) yet",
     ]
 
 
@@ -128,7 +141,7 @@ def test_switch_to_another_plan_is_returned() -> None:
     assert update.plan["planExternalId"] == "p-2"
 
 
-def test_missing_ready_plan_is_logged_once_until_one_appears() -> None:
+def test_missing_plan_is_logged_once_until_one_appears() -> None:
     source = StubSource()
     source.plan_id = None
     log = RecordingLog()
@@ -141,7 +154,7 @@ def test_missing_ready_plan_is_logged_once_until_one_appears() -> None:
     source.plan_id = None
     poller.poll()
 
-    assert len([m for m in log.messages("info") if "No Ready plan" in m]) == 2
+    assert len([m for m in log.messages("info") if "No Active or Ready plan" in m]) == 2
 
 
 def test_errors_are_logged_and_the_next_poll_retries() -> None:
@@ -213,14 +226,15 @@ class StubSource:
         self.lookup_args: List[tuple] = []
         self.plan_area = "area-1"
         self.plan_name: Optional[str] = "named"
+        self.plan_status = "Ready"
 
-    def latest_ready_plan(self, area_external_id: Any = None, vessel_external_id: Any = None) -> Any:
+    def plan_to_follow(self, area_external_id: Any = None, vessel_external_id: Any = None) -> Any:
         self.lookup_args.append((area_external_id, vessel_external_id))
         if self.fail is not None:
             raise self.fail
         if self.plan_id is None:
             return None
-        plan = _Plan(self.plan_id, self.plan_area)
+        plan = _Plan(self.plan_id, self.plan_area, self.plan_status)
         if self.plan_name is None:
             plan.name = None
         return plan
@@ -243,7 +257,8 @@ class StubSource:
 
 
 class _Plan:
-    def __init__(self, external_id: str, area_external_id: str) -> None:
+    def __init__(self, external_id: str, area_external_id: str, status: str = "Ready") -> None:
         self.external_id = external_id
         self.name: Optional[str] = "Plan " + external_id
         self.area_external_id = area_external_id
+        self.status = status

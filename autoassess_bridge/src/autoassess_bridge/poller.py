@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Poll CDF for the area's Ready plan and report it only when its content changed."""
+"""Poll CDF for the plan to follow (Active, else newest Ready) and report content changes."""
 
 from __future__ import annotations
 
@@ -24,8 +24,9 @@ class PlanPoller:
     A plan is new when its plan.json (minus `downloadedAt`) differs from the last one returned,
     so task edits are caught even though they do not touch the plan node. Errors are logged
     (once per distinct message) and swallowed; the next poll simply retries.
-    Without filters it follows the newest Ready plan of the whole project; `area_external_id`
-    and/or `vessel_external_id` restrict that. `log` needs info(), warning() and error().
+    Without filters it follows the whole project's Active plan, else its newest Ready plan
+    (see `PlanSource.plan_to_follow`); `area_external_id` and/or `vessel_external_id` restrict
+    that. `log` needs info(), warning() and error().
     """
 
     def __init__(
@@ -59,12 +60,14 @@ class PlanPoller:
         return update
 
     def _poll(self) -> Optional[PlanUpdate]:
-        plan = self._source.latest_ready_plan(
+        plan = self._source.plan_to_follow(
             area_external_id=self._area, vessel_external_id=self._vessel
         )
         if plan is None:
             if not self._reported_no_plan:
-                self._log.info("No Ready plan (filter: {}) yet".format(self.filter_description))
+                self._log.info(
+                    "No Active or Ready plan (filter: {}) yet".format(self.filter_description)
+                )
                 self._reported_no_plan = True
             return None
         self._reported_no_plan = False
@@ -79,11 +82,12 @@ class PlanPoller:
         self._last_key = key
         if plan.external_id != self._last_plan_id:
             self._log.info(
-                "Following plan {} {} in {}/{}".format(
+                "Following plan {} {} in {}/{} ({})".format(
                     plan.external_id,
                     "'{}'".format(plan.name) if plan.name else "(no name)",
                     area.vessel_name or area.vessel_external_id or "?",
                     area.name or area.external_id,
+                    "Active" if plan.status == "Active" else "newest Ready — no Active plan set",
                 )
             )
             self._last_plan_id = plan.external_id

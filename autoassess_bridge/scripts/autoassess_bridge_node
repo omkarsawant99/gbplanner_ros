@@ -347,7 +347,10 @@ def main():
 
     log = RosLog()
     poller = PlanPoller(
-        cdf.PlanSource(client, space=space), log, area_external_id=area, vessel_external_id=vessel
+        cdf.PlanSource(client, space=space, log=log),
+        log,
+        area_external_id=area,
+        vessel_external_id=vessel,
     )
     bound = GlobalBoundSetter(make_bound_call(service_name, timeout_s), log) if set_bound else None
     plan_pub = rospy.Publisher(
@@ -357,7 +360,8 @@ def main():
     targets_pub = rospy.Publisher("/autoassess/inspection_targets", PoseArray, queue_size=1, latch=True)
     plan_id_pub = rospy.Publisher("/autoassess/plan_id", String, queue_size=1, latch=True)
     rospy.loginfo(
-        "Following the newest Ready AutoAssess plan (filter: %s), polling every %.1f s",
+        "Following the Active AutoAssess plan, else the newest Ready one (filter: %s), "
+        "polling every %.1f s",
         poller.filter_description, period_s,
     )
 

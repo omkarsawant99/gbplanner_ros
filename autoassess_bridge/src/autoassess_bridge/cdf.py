@@ -51,7 +51,10 @@ _UUID_RE = re.compile(
 _VALID_TASK_KINDS = frozenset({"element", "region"})
 _VALID_INSPECTION_TYPES = frozenset({"visual", "ndt_thickness"})
 _VALID_ELEMENT_TYPES = frozenset({"manhole", "longitudinal", "wall", "compartment"})
-_VALID_STATUSES = frozenset({"Draft", "Ready", "Complete"})
+_VALID_STATUSES = frozenset({"Draft", "Ready", "Active", "Complete"})
+# The statuses the bridge may follow, in order of precedence: the viewer marks at most one plan
+# per area "Active"; "Ready" is the fallback. Draft/Complete plans are never followed.
+_FOLLOWABLE_STATUSES = ("Active", "Ready")
 
 
 def token_url(tenant_id: str) -> str:
@@ -114,30 +117,40 @@ class AreaInfo:
 
 
 class PlanSource:
-    """Reads plans, tasks, and area data for one AutoAssess space."""
+    """Reads plans, tasks, and area data for one AutoAssess space.
+
+    `log` (optional) needs warning(); without one the multiple-Active warning is dropped.
+    """
 
     def __init__(
         self,
         client: CogniteClient,
         space: str = SPACE,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        log: Optional[Any] = None,
     ) -> None:
         self._instances = client.data_modeling.instances
         self._space = space
         self._now = now
+        self._log = log
 
-    def latest_ready_plan(
+    def plan_to_follow(
         self,
         area_external_id: Optional[str] = None,
         vessel_external_id: Optional[str] = None,
     ) -> Optional[Plan]:
-        """The most recently updated non-deleted Ready plan in the project, if any.
+        """The non-deleted plan the bridge should follow, if any.
 
-        Optionally only plans of one area and/or of the areas of one vessel.
+        In order: the most recently updated **Active** plan (the viewer sets at most one per
+        area); without any Active plan, the most recently updated **Ready** plan. Update-time
+        ties are broken by creation time. Draft and Complete plans are never followed.
+        Optionally only plans of one area and/or of the areas of one vessel. Several Active
+        plans are a viewer-side inconsistency: a warning names them all and the most recently
+        updated one wins.
         """
         plan_prop = lambda name: self._prop(INSPECTION_PLAN_CONTAINER, name)  # noqa: E731
         filters: List[Dict[str, Any]] = [
-            {"equals": {"property": plan_prop("status"), "value": "Ready"}},
+            {"in": {"property": plan_prop("status"), "values": list(_FOLLOWABLE_STATUSES)}},
             {"not": {"exists": {"property": plan_prop("deletedAt")}}},
         ]
         if area_external_id:
@@ -156,10 +169,21 @@ class PlanSource:
             limit=None,
         )
         plans = [self._map_plan(item) for item in items if item.instance_type == "node"]
+        newest = lambda cs: max(cs, key=lambda p: (p.last_updated_time, p.created_time))  # noqa: E731
+        active = [p for p in plans if p.status == "Active"]
+        if len(active) > 1 and self._log is not None:
+            self._log.warning(
+                "{} Active plans ({}) although the viewer keeps at most one per area; "
+                "following the most recently updated".format(
+                    len(active), ", ".join(p.external_id for p in active)
+                )
+            )
+        if active:
+            return newest(active)
         ready = [p for p in plans if p.status == "Ready"]
         if not ready:
             return None
-        return max(ready, key=lambda p: (p.last_updated_time, p.created_time))
+        return newest(ready)
 
     def area_info(self, area_external_id: str) -> AreaInfo:
         """The area's name and its vessel (externalId and name, None if not set)."""
