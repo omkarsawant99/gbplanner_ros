@@ -12,6 +12,8 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="rviz_en" default="true" />
   <arg name="autoassess_bridge_en" default="true" />
+  <arg name="inspection_target_waypoints_en" default="true" />
+  <arg name="inspection_target_auto_start" default="false" />
   <arg name="launch_prefix" default=""/> <!-- gdb -ex run //args -->
   <param name="use_sim_time" value="$(arg use_sim_time)"/>
 
@@ -27,6 +29,8 @@
 	<!-- AutoAssess plan and reference map -->
 	<include if="$(arg autoassess_bridge_en)" file="$(find autoassess_bridge)/launch/autoassess_bridge.launch">
 		<arg name="odometry_topic" value="$(arg odometry_topic)"/>
+		<arg name="inspection_target_waypoints_en" value="$(arg inspection_target_waypoints_en)"/>
+		<arg name="inspection_target_auto_start" value="$(arg inspection_target_auto_start)"/>
 	</include>
 
 
@@ -93,6 +97,9 @@
 
 	
 	<!-- Rviz -->
-	<node pkg="rviz" type="rviz" name="gbplanner_ui" output="screen" args="-d $(find gbplanner)/config/$(arg config_folder)/ui.rviz"/>
+	<node pkg="rviz" type="rviz" name="gbplanner_ui" output="screen" args="-d $(find gbplanner)/config/$(arg config_folder)/ui.rviz">
+		<param if="$(arg inspection_target_waypoints_en)" name="waypoint_service" value="/inspection_target_waypoints/start"/>
+		<param if="$(arg inspection_target_waypoints_en)" name="waypoint_button_label" value="Start Inspection Waypoints"/>
+	</node>
 
 </launch>

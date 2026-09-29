@@ -14,8 +14,15 @@ gbplanner_panel::gbplanner_panel(QWidget* parent) : rviz::Panel(parent) {
   planner_client_init_motion =
       nh.serviceClient<planner_msgs::pci_initialization>(
           "pci_initialization_trigger");
-  planner_client_plan_to_waypoint = nh.serviceClient<std_srvs::Trigger>(
-      "/planner_control_interface/std_srvs/go_to_waypoint");
+  ros::NodeHandle private_nh("~");
+  std::string waypoint_service;
+  std::string waypoint_button_label;
+  private_nh.param<std::string>("waypoint_service", waypoint_service,
+                                "/planner_control_interface/std_srvs/go_to_waypoint");
+  private_nh.param<std::string>("waypoint_button_label", waypoint_button_label,
+                                "Plan to Waypoint");
+  planner_client_plan_to_waypoint =
+      nh.serviceClient<std_srvs::Trigger>(waypoint_service);
   planner_client_global_planner =
       nh.serviceClient<planner_msgs::pci_global>("pci_global");
   change_operation_mode_client = nh.serviceClient<std_srvs::SetBool>(
@@ -37,7 +44,7 @@ gbplanner_panel::gbplanner_panel(QWidget* parent) : rviz::Panel(parent) {
   button_stop_planner->setText("Stop Planner");
   button_homing->setText("Go Home");
   button_init_motion->setText("Initialization");
-  button_plan_to_waypoint->setText("Plan to Waypoint");
+  button_plan_to_waypoint->setText(QString::fromStdString(waypoint_button_label));
   button_global_planner->setText("Run Global");
   button_change_operation_mode->setText("Operation Mode (EXP)");
 
@@ -125,6 +132,10 @@ void gbplanner_panel::on_plan_to_waypoint_click() {
   if (!planner_client_plan_to_waypoint.call(srv)) {
     ROS_ERROR("[GBPLANNER-UI] Service call failed: %s",
               planner_client_plan_to_waypoint.getService().c_str());
+  } else if (!srv.response.success) {
+    ROS_ERROR("[GBPLANNER-UI] %s: %s",
+              planner_client_plan_to_waypoint.getService().c_str(),
+              srv.response.message.c_str());
   }
 }
 
