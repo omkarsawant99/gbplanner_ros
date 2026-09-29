@@ -1,5 +1,11 @@
 # autoassess_bridge
 
+> Canonical repo: [AUTOASSESS/autoassess-cgn-bridge](https://github.com/AUTOASSESS/autoassess-cgn-bridge).
+> The package is also integrated with the flight stack on the
+> [`gbplanner_ros-autoassess` branch of omkarsawant99/gbplanner_ros](https://github.com/omkarsawant99/gbplanner_ros/tree/gbplanner_ros-autoassess);
+> the two are kept in sync. The web viewer/SDK live in
+> [cognitedata/autoassess-ui-dss-open-project](https://github.com/cognitedata/autoassess-ui-dss-open-project).
+
 A small ROS 1 (Noetic) node that connects gbplanner to AutoAssess, which stores its data in
 Cognite Data Fusion (CDF). It does three things:
 
