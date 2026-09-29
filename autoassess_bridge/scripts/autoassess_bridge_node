@@ -250,13 +250,21 @@ class MissionUploads:
         self._detector.on_speed((v.x * v.x + v.y * v.y + v.z * v.z) ** 0.5, time.time())
 
 
-def make_map_publisher(topic, frame_id):
+def make_map_publisher(topic, frame_id, rate_hz):
     pub = rospy.Publisher(topic, PointCloud2, queue_size=1, latch=True)
+    lock = threading.Lock()
+    latest = [None]
+
+    def republish(_event=None):
+        with lock:
+            if latest[0] is None:
+                return
+            latest[0].header.stamp = rospy.Time.now()
+            pub.publish(latest[0])
 
     def publish(_map_id, _map_file, cloud):
         msg = PointCloud2()
         msg.header.frame_id = frame_id
-        msg.header.stamp = rospy.Time.now()
         msg.height = cloud.height
         msg.width = cloud.width
         msg.fields = [
@@ -268,8 +276,11 @@ def make_map_publisher(topic, frame_id):
         msg.row_step = cloud.point_step * cloud.width
         msg.data = cloud.data
         msg.is_dense = cloud.is_dense
-        pub.publish(msg)
+        with lock:
+            latest[0] = msg
+        republish()
 
+    publish.timer = rospy.Timer(rospy.Duration(1.0 / rate_hz), republish) if rate_hz > 0 else None
     return publish
 
 
@@ -322,7 +333,11 @@ def main():
         maps = MapUpdater(
             MapSource(client, rospy.get_param("~map_cache_dir", DEFAULT_CACHE_DIR), log, space=space),
             rospy.get_param("~map_file_label", "") or None,
-            make_map_publisher(map_topic, rospy.get_param("~map_frame_id", "") or frame_id),
+            make_map_publisher(
+                map_topic,
+                rospy.get_param("~map_frame_id", "") or frame_id,
+                float(rospy.get_param("~map_publish_rate_hz", 1.0)),
+            ),
             log,
             retry_s=max(period_s, 30.0),
         )

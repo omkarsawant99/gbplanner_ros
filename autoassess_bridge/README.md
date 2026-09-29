@@ -30,6 +30,11 @@ roslaunch autoassess_bridge autoassess_bridge.launch
 #   roslaunch autoassess_bridge autoassess_bridge.launch odometry_topic:=<your nav_msgs/Odometry topic>
 ```
 
+In this workspace, the bridge launch also searches `sdk/.python-deps` for Python packages.
+To install its dependencies there for the ROS node's `/usr/bin/python3` interpreter, run
+`python3 -m pip install --target sdk/.python-deps -r src/exploration/gbplanner_ros/autoassess_bridge/requirements.txt`
+from the workspace root. Pass `python_deps_dir:=/path/to/packages` if you use another location.
+
 - **Which plan.** No area id is needed. The bridge follows the newest Ready plan of the whole
   project, and that plan's area drives the global bound, the reference map and the upload area.
   Marking any plan Ready in AutoAssess switches the robot to it. To stay on one vessel or one
@@ -110,9 +115,10 @@ goes out as a latched `sensor_msgs/PointCloud2` on `~map_topic` (default
 - **Cache.** Files are downloaded once into `~map_cache_dir` (default
   `~/.ros/autoassess_maps/<file id>/`). A restart publishes from the cache.
 - **When it is published.** Loading runs in the background, after the plan topics are
-  published. The map is published once per map; it is republished only when the plan's
-  `mapExternalId` changes. The log says which file and how many points. If a load fails, it is
-  logged and retried after `max(poll_period_s, 30)` s.
+  published. The map is published as soon as it loads, then republished from memory at
+  `~map_publish_rate_hz` (default 1 Hz) with a fresh timestamp. Set the rate to `0` to
+  publish only when the map changes. The log says which file and how many points. If a load
+  fails, it is logged and retried after `max(poll_period_s, 30)` s.
 - **Plans without a map.** A plan without a `mapExternalId` is logged once, and the last map
   stays published.
 
@@ -228,7 +234,7 @@ All parameters are private (`~`), with defaults in
 | Group | Parameters |
 | --- | --- |
 | Plan | `vessel_external_id`, `area_external_id` (optional filters), `space`, `poll_period_s`, `frame_id`, `standoff_m` |
-| Reference map | `publish_map`, `map_topic`, `map_frame_id`, `map_file_label`, `map_cache_dir` |
+| Reference map | `publish_map`, `map_topic`, `map_publish_rate_hz`, `map_frame_id`, `map_file_label`, `map_cache_dir` |
 | Findings | `findings_merge_radius_m` |
 | Global bound | `set_global_bound`, `bound_margin_m`, `global_bound_service`, `service_timeout_s` |
 | Mission upload | `upload_enabled`, `upload_on_mission_end`, `mesh_filename`, `generate_mesh_service`, `mesh_timeout_s`, `mission_dir`, `mission_end_quiet_s`, `mission_end_max_speed`, `path_topic`, `homing_topic` |
