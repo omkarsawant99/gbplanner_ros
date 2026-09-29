@@ -85,6 +85,8 @@
 		<remap from="odometry" to="$(arg odometry_topic)" />
 		<rosparam command="load" file="$(arg opening_config_file)" />
 		<param name="reference_frame" value="$(arg world_frame)"/>
+		<!-- Must match the organizer's row count: detector indexes offsets by row. -->
+		<param name="num_laser_beams" value="128"/>
 		<!-- The reference map arrives at 1 Hz, so require four matching frames. -->
 		<param name="min_detection_to_be_permenant" value="4"/>
 	</node>

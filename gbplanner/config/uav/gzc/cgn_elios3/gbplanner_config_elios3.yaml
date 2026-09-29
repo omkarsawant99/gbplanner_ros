@@ -532,14 +532,14 @@ PlanningParams:
   add_only_frontiers_to_global_graph: false
 
   # small comp
-  min_coverage_percentage: 0.9
-  inspection_xy_spacing: 1.0 # 1.5
-  inspection_z_spacing: 0.6 #0.6 # 1.0 # 2.0
+  min_coverage_percentage: 0.98
+  inspection_xy_spacing: 0.5
+  inspection_z_spacing: 0.3
   inspection_thr_esdf_dist: 0.5
   inspection_target_viewing_range: 1.5 # 2.5
   inspection_pt_dist: 0.9 # 1.0
   verification_target_viewing_range: 2.5
-  inspection_graph_vertices: 250
+  inspection_graph_vertices: 500
   max_inspection_vertices: 50
   num_lkh_iterations: 10
 
