@@ -116,7 +116,11 @@ cd ~/omniplanner_dev_env/omniplanner_ws/src/exploration
 #### Clone the planner
 ```bash
 git clone git@github.com:ntnu-arl/gbplanner_ros.git
+cd gbplanner_ros
+git submodule update --init --recursive
 ```
+
+Run the submodule update command after pulling changes that update submodule revisions. It checks out `autoassess_bridge` at the commit required by this repository.
 
 #### Clone and update the required packages
 ```bash
@@ -137,6 +141,16 @@ catkin build
 ```bash
 source ~/omniplanner_dev_env/omniplanner_ws/devel/setup.sh
 ```
+
+### Run the AutoAssess CGN inspection setup
+
+On the `gbplanner_ros-autoassess` branch, after building and sourcing the workspace, put the CDF credentials in `sdk/.env` at the workspace root and install the bridge's Python dependencies as described in the [bridge README](autoassess_bridge/README.md#typical-setup). Then run:
+
+```bash
+roslaunch gbplanner gbplanner_cgn.launch
+```
+
+This launch file starts the planner, manhole detector, simulation, and AutoAssess bridge together.
 
 ## Citation
 
