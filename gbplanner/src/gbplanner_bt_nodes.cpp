@@ -432,6 +432,19 @@ BT::NodeStatus OPENINGPhase1::onStart()
   OpeningTraversalStatus status;
 
   gbplanner_->getOpeningTraversalPath(mode, status);
+  // The detector needs several clouds before an opening becomes stable. Keep
+  // this service request alive long enough to receive its first detections;
+  // otherwise the Idle branch stops PCI after a single early empty result.
+  double detection_wait_s = 15.0;
+  ros::NodeHandle("~").param("opening_detection_wait_s", detection_wait_s, detection_wait_s);
+  const ros::WallTime deadline = ros::WallTime::now() + ros::WallDuration(std::max(0.0, detection_wait_s));
+  while (status == OpeningTraversalStatus::NO_OPENINGS && ros::ok() &&
+         ros::WallTime::now() < deadline)
+  {
+    ros::WallDuration(0.25).sleep();
+    ros::spinOnce();
+    gbplanner_->getOpeningTraversalPath(mode, status);
+  }
   if(status == OpeningTraversalStatus::CANT_CONNECT)
   {
     ++failed_opening_phase1_count_;
@@ -591,4 +604,3 @@ BT::NodeStatus Idle::tick()
   return BT::NodeStatus::FAILURE;
 }
 /*******************************************************/
-

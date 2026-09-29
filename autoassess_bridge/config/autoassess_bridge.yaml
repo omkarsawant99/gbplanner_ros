@@ -13,7 +13,7 @@ frame_id: world                 # frame of /autoassess/inspection_targets (plan 
 standoff_m: 0.8                 # distance of each inspection pose from its target
 publish_map: true               # publish the plan's reference map (point cloud), latched
 map_topic: /ballast_tank/pointcloud
-map_publish_rate_hz: 1.0        # republish the loaded cloud at 1 Hz (0 = publish once)
+map_publish_rate_hz: 10.0        # republish the loaded cloud at 1 Hz (0 = publish once)
 map_frame_id: ""                # frame of the map cloud ("" = frame_id)
 map_file_label: ""              # pick the map campaign's point cloud with this label ("" = first)
 map_cache_dir: ~/.ros/autoassess_maps  # downloaded map files, one folder per CDF file id

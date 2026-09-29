@@ -8069,16 +8069,35 @@ std::vector<geometry_msgs::Pose> Rrg::getOpeningTraversalPath(OpeningTraversalMo
 		return through_path;
 	}
 
-	std::shared_ptr<Opening> best_opening;
+  std::shared_ptr<Opening> best_opening;
 	double closest_distance = std::numeric_limits<double>::max();
   bool found = false;
   if(mode == OpeningTraversalMode::kGoingTo) {
+    bool opening_forward_only = false;
+    nh_private_.param("opening_forward_only", opening_forward_only, false);
   // if(mode != OpeningTraversalMode::kPassingThrough && mode != OpeningTraversalMode::kPathCheck) {
     for(auto it : detected_openings_) {
       std::shared_ptr<Opening> current_opening = it.second;
       if(!current_opening->active || current_opening->num_tries >= planning_params_.max_opening_attempts) {
         /* TODO: Update active status of all the semantics based on this */
         continue;
+      }
+
+      // The compartment centers define the mission's forward direction.
+      // Robot yaw can point backward after inspection, so filter by progress
+      // toward the next compartment instead of by the robot's current yaw.
+      if(opening_forward_only && next_compartment_index_ > 0 &&
+         next_compartment_index_ < static_cast<int>(planning_params_.compartment_centers.size())) {
+        const Eigen::Vector3d forward =
+            planning_params_.compartment_centers[next_compartment_index_] -
+            planning_params_.compartment_centers[next_compartment_index_ - 1];
+        const Eigen::Vector3d robot_to_opening(
+            current_opening->pose.position.x - current_state_[0],
+            current_opening->pose.position.y - current_state_[1], 0.0);
+        if(forward.head<2>().squaredNorm() > 1e-6 &&
+           forward.head<2>().dot(robot_to_opening.head<2>()) <= 0.0) {
+          continue;
+        }
       }
       
       if(planning_params_.exploration_only)  // If exploration only, go to the closest opening

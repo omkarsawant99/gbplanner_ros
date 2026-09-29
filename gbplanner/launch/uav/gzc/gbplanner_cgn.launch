@@ -3,6 +3,11 @@
 	<!-- All settings -->
 	<arg name="robot_name" default="rmf_obelix"/>
 	<arg name="config_folder" default="uav/gzc/bwt_inspection"/>
+	<arg name="world_frame" default="world"/>
+	<arg name="pointcloud_topic" default="/ballast_tank/pointcloud"/>
+	<arg name="organized_cloud_topic" default="/manhole/organized_cloud"/>
+	<arg name="organized_range_image_topic" default="/manhole/range_image"/>
+	<arg name="organizer_projection_frame" default="$(arg robot_name)/base_link"/>
 	<arg name="gazebo_gui_en" default="false"/>
   <arg name="use_sim_time" default="true"/>
   <arg name="rviz_en" default="true" />
@@ -11,9 +16,9 @@
   <param name="use_sim_time" value="$(arg use_sim_time)"/>
 
 	<!-- Config files -->
-	<arg name="gbplanner_config_file" default="$(find gbplanner)/config/$(arg config_folder)/gbplanner_config.yaml"/>
-	<arg name="pci_file" default="$(find gbplanner)/config/$(arg config_folder)/planner_control_interface_sim_config.yaml"/>
-	<arg name="voxblox_config_file" default="$(find gbplanner)/config/$(arg config_folder)/voxblox_sim_config.yaml"/>
+	<arg name="gbplanner_config_file" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/gbplanner_config_elios3.yaml"/>
+	<arg name="pci_file" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/planner_control_interface_config_elios3.yaml"/>
+	<arg name="voxblox_config_file" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/voxblox_config_elios3.yaml"/>
 	<arg name="map_config_file" default="$(arg voxblox_config_file)"/>
 	<arg name="opening_config_file" default="$(find manhole_detector)/config/manhole_detector.yaml"/>
 
@@ -31,16 +36,20 @@
 		<arg name="launch_prefix" value="$(arg launch_prefix)"/>
 		<arg name="gazebo_gui_en" value="$(arg gazebo_gui_en)"/>
 	</include>
+
 	<!-- Graph based planning -->
 	<node pkg="gbplanner" type="gbplanner_node" name="gbplanner_node" output="screen" launch-prefix="$(arg launch_prefix)">
 		<remap from="odometry" to="$(arg odometry_topic)" />
-		<!-- <remap from="/pointcloud" to="/rmf_obelix/velodyne_points" /> -->
-		<remap from="/pointcloud" to="/ballast_tank/pointcloud" />
+		<remap from="/pointcloud" to="$(arg pointcloud_topic)" />
 		<remap from="opening_detections" to="stable_detections"/>
 		<remap from="query_point" to="/rmf_obelix/tsdf_query_pt"/>
 		<rosparam command="load" file="$(arg gbplanner_config_file)" />
 		<rosparam command="load" file="$(arg map_config_file)" />
-		<param name="behavior_tree_path" value="$(find gbplanner)/config/$(arg config_folder)/main_tree.xml"/>
+		<param name="world_frame" value="$(arg world_frame)"/>
+		<param name="PlanningParams/global_frame_id" value="$(arg world_frame)"/>
+		<param name="behavior_tree_path" value="$(find gbplanner)/config/uav/gzc/cgn_elios3/main_tree_integeration.xml"/>
+		<param name="opening_detection_wait_s" value="15.0"/>
+		<param name="opening_forward_only" value="true"/>
 	</node>
 
 	<!-- Planner and Control Interface -->
@@ -50,20 +59,35 @@
 		<remap from="planner_homing_server" to="gbplanner/homing" />
 		<remap from="odometry" to="$(arg odometry_topic)"/>     
 		<rosparam command="load" file="$(arg pci_file)" />
+		<param name="world_frame_id" value="$(arg world_frame)"/>
 	</node>
+
+	<!-- Project the unorganized reference map into the detector's spherical image. -->
+	<include file="$(find manhole_detector)/launch/spherical_cloud_organizer.launch">
+		<arg name="input_cloud" value="$(arg pointcloud_topic)"/>
+		<arg name="organized_cloud" value="$(arg organized_cloud_topic)"/>
+		<arg name="range_image" value="$(arg organized_range_image_topic)"/>
+		<arg name="rows" value="128"/>
+		<arg name="columns" value="256"/>
+		<arg name="min_elevation_deg" value="-50.0"/>
+		<arg name="max_elevation_deg" value="90.0"/>
+		<arg name="min_range" value="0.3"/>
+		<arg name="max_range" value="7.0"/>
+		<arg name="fill_iterations" value="1"/>
+		<arg name="projection_frame" value="$(arg organizer_projection_frame)"/>
+		<arg name="restamp_output" value="false"/>
+		<arg name="use_latest_transform" value="false"/>
+	</include>
 
 	<node pkg="manhole_detector" type="manhole_detector_node" name="manhole_detector_node" output="screen">
-		<!-- <remap from="pcl_in" to="/rmf_obelix/velodyne_points" /> -->
-		<remap from="pcl_in" to="/ballast_tank/pointcloud" />
-		<remap from="depth_img_in" to="/img_node/range_image" />
+		<remap from="pcl_in" to="$(arg organized_cloud_topic)" />
+		<remap from="depth_img_in" to="$(arg organized_range_image_topic)" />
 		<remap from="odometry" to="$(arg odometry_topic)" />
 		<rosparam command="load" file="$(arg opening_config_file)" />
+		<param name="reference_frame" value="$(arg world_frame)"/>
+		<!-- The reference map arrives at 1 Hz, so require four matching frames. -->
+		<param name="min_detection_to_be_permenant" value="4"/>
 	</node>
-
-	<include file="$(find manhole_detector)/launch/depth_image_publisher.launch">
-			<!-- <arg name="point_cloud_topic_name" 	default="/rmf_obelix/velodyne_points"/> -->
-			<arg name="point_cloud_topic_name" 	default="/ballast_tank/pointcloud"/>
-	</include>
 
 	
 	<!-- Rviz -->

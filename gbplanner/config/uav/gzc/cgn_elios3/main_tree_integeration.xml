@@ -1,0 +1,15 @@
+<root BTCPP_format="4">
+  <include path="./bt_xml/insp_opening.xml" />
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+      <ReactiveFallback>
+        <HomingCheck/>
+        <Sequence>
+          <SubTree ID="insp_opening"/>
+          <AlwaysFailure/>
+        </Sequence>
+      </ReactiveFallback>
+      <Homing/>
+    </Sequence>
+  </BehaviorTree>
+</root>
