@@ -23,6 +23,7 @@
 	<arg name="voxblox_config_file" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/voxblox_config_elios3.yaml"/>
 	<arg name="map_config_file" default="$(arg voxblox_config_file)"/>
 	<arg name="opening_config_file" default="$(find manhole_detector)/config/manhole_detector.yaml"/>
+	<arg name="planner_behaviour_tree" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/waypoint_reach_bwt.xml"/>
 
 	<arg name="odometry_topic" default="/rmf_obelix/ground_truth/odometry_throttled"/>
 
@@ -51,7 +52,7 @@
 		<rosparam command="load" file="$(arg map_config_file)" />
 		<param name="world_frame" value="$(arg world_frame)"/>
 		<param name="PlanningParams/global_frame_id" value="$(arg world_frame)"/>
-		<param name="behavior_tree_path" value="$(find gbplanner)/config/uav/gzc/cgn_elios3/main_tree_integeration.xml"/>
+		<param name="behavior_tree_path" value="$(arg planner_behaviour_tree)"/>
 		<param name="opening_detection_wait_s" value="15.0"/>
 		<param name="opening_forward_only" value="true"/>
 	</node>
@@ -100,6 +101,10 @@
 	<node pkg="rviz" type="rviz" name="gbplanner_ui" output="screen" args="-d $(find gbplanner)/config/$(arg config_folder)/ui.rviz">
 		<param if="$(arg inspection_target_waypoints_en)" name="waypoint_service" value="/inspection_target_waypoints/start"/>
 		<param if="$(arg inspection_target_waypoints_en)" name="waypoint_button_label" value="Start Inspection Waypoints"/>
+		<param name="altitude_command_topic" value="/$(arg robot_name)/command/trajectory"/>
+		<param name="altitude_odometry_topic" value="$(arg odometry_topic)"/>
+		<param name="altitude_setpoint_z" value="1.0"/>
+		<param name="altitude_frame_id" value="$(arg world_frame)"/>
 	</node>
 
 </launch>

@@ -98,6 +98,7 @@ class Gbplanner {
   Rrg::GlobalPlannerStatus getGlobalExplorationPath();
   bool checkGlobalExplorationStatus();
   bool getInspectionPath();
+  bool prepareWaypointGraph();
   
   bool getHomingPath();
   bool homingRequired();

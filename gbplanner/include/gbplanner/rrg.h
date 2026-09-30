@@ -260,6 +260,9 @@ class Rrg {
   std::vector<geometry_msgs::Pose> getGlobalPath(
       geometry_msgs::PoseStamped& waypoint);
 
+  // Commit the inspection planner's local graph before another BT action runs.
+  bool commitInspectionGraph();
+
   std::vector<geometry_msgs::Pose> getOpeningTraversalPath();
   std::vector<geometry_msgs::Pose> getOpeningTraversalPath(OpeningTraversalMode mode, OpeningTraversalStatus &status);
   void setNextCompartmentCenter(Eigen::Vector3d &center);

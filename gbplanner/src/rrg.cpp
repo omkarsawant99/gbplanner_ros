@@ -3147,6 +3147,17 @@ void Rrg::addFrontiers(int best_vertex_id) {
   visualization_->visualizeRobotStateHistory(robot_state_hist_->state_hist_);
 }
 
+bool Rrg::commitInspectionGraph() {
+  if (add_frontiers_to_global_graph_) {
+    add_frontiers_to_global_graph_ = false;
+    addFrontiers(0);
+  }
+  const int vertices = global_graph_->getNumVertices();
+  ROS_INFO("Inspection graph committed to global graph: %d vertices", vertices);
+  visualization_->visualizeGlobalGraph(global_graph_);
+  return vertices > 1;
+}
+
 bool Rrg::resetTimerCallback(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res) {
     resetMissionTimer();
     ROS_WARN_COND(global_verbosity >= Verbosity::PLANNER_STATUS, "Mission time reset.");

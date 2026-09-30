@@ -54,6 +54,7 @@ void GbplannerRos::registerTree()
   factory_.registerNodeType<LocalExpExhaustedCheck>("LocalExpExhaustedCheck", gbplanner_);
   factory_.registerNodeType<GlobalExpExhaustedCheck>("GlobalExpExhaustedCheck", gbplanner_);
   factory_.registerNodeType<Inspection>("Inspection", gbplanner_);
+  factory_.registerNodeType<BuildInspectionGraph>("BuildInspectionGraph", gbplanner_);
   factory_.registerNodeType<CompartmentTransition>("CompartmentTransition", gbplanner_);
   factory_.registerNodeType<Homing>("Homing", gbplanner_);
   factory_.registerNodeType<HomingCheck>("HomingCheck", gbplanner_);

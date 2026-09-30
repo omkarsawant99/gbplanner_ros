@@ -314,6 +314,22 @@ private:
 
 
 
+// Build an inspection graph for waypoint routing without returning its flight path.
+class BuildInspectionGraph : public BT::SyncActionNode
+{
+public:
+  BuildInspectionGraph(const std::string& name, const BT::NodeConfig& config,
+                       std::shared_ptr<Gbplanner> gbplanner)
+    : SyncActionNode(name, config), gbplanner_(std::move(gbplanner)) {}
+
+  static BT::PortsList providedPorts() { return {}; }
+  BT::NodeStatus tick() override;
+
+private:
+  std::shared_ptr<Gbplanner> gbplanner_;
+};
+
+
 class CompartmentTransition : public BT::StatefulActionNode
 {
 public:

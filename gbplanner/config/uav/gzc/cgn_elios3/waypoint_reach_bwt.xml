@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
+  <include path="./bt_xml/opening_passing.xml" />
+
+  <BehaviorTree ID="waypoint_reach_bwt">
+    <Fallback>
+      <Sequence>
+        <SetNextCompartment/>
+        <BuildInspectionGraph/>
+        <SubTree ID="opening_passing"/>
+      </Sequence>
+      <Idle/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+      <ReactiveFallback>
+        <HomingCheck/>
+        <Sequence>
+          <SubTree ID="waypoint_reach_bwt"/>
+          <AlwaysFailure/>
+        </Sequence>
+      </ReactiveFallback>
+      <Homing/>
+    </Sequence>
+  </BehaviorTree>
+</root>

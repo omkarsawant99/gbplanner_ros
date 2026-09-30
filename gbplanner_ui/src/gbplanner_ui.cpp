@@ -1,4 +1,6 @@
 #include "gbplanner_ui.h"
+
+#include <cmath>
 // pci_initialization_trigger
 namespace gbplanner_ui {
 
@@ -21,6 +23,18 @@ gbplanner_panel::gbplanner_panel(QWidget* parent) : rviz::Panel(parent) {
                                 "/planner_control_interface/std_srvs/go_to_waypoint");
   private_nh.param<std::string>("waypoint_button_label", waypoint_button_label,
                                 "Plan to Waypoint");
+  std::string altitude_command_topic;
+  std::string altitude_odometry_topic;
+  private_nh.param<std::string>("altitude_command_topic", altitude_command_topic,
+                                "command/trajectory");
+  private_nh.param<std::string>("altitude_odometry_topic", altitude_odometry_topic,
+                                "odometry");
+  private_nh.param<double>("altitude_setpoint_z", altitude_setpoint_z, 1.0);
+  private_nh.param<std::string>("altitude_frame_id", altitude_frame_id, "world");
+  altitude_setpoint_pub =
+      nh.advertise<trajectory_msgs::MultiDOFJointTrajectory>(altitude_command_topic, 1);
+  odometry_sub = nh.subscribe(altitude_odometry_topic, 1,
+                              &gbplanner_panel::odometry_callback, this);
   planner_client_plan_to_waypoint =
       nh.serviceClient<std_srvs::Trigger>(waypoint_service);
   planner_client_global_planner =
@@ -35,6 +49,7 @@ gbplanner_panel::gbplanner_panel(QWidget* parent) : rviz::Panel(parent) {
   button_stop_planner = new QPushButton;
   button_homing = new QPushButton;
   button_init_motion = new QPushButton;
+  button_altitude_setpoint = new QPushButton;
   button_plan_to_waypoint = new QPushButton;
   button_global_planner = new QPushButton;
   button_change_operation_mode = new QPushButton;
@@ -44,6 +59,8 @@ gbplanner_panel::gbplanner_panel(QWidget* parent) : rviz::Panel(parent) {
   button_stop_planner->setText("Stop Planner");
   button_homing->setText("Go Home");
   button_init_motion->setText("Initialization");
+  button_altitude_setpoint->setText(
+      QString("Move to z = %1 m").arg(altitude_setpoint_z, 0, 'f', 1));
   button_plan_to_waypoint->setText(QString::fromStdString(waypoint_button_label));
   button_global_planner->setText("Run Global");
   button_change_operation_mode->setText("Operation Mode (EXP)");
@@ -53,6 +70,7 @@ gbplanner_panel::gbplanner_panel(QWidget* parent) : rviz::Panel(parent) {
   v_box_layout->addWidget(button_stop_planner);
   v_box_layout->addWidget(button_homing);
   v_box_layout->addWidget(button_init_motion);
+  v_box_layout->addWidget(button_altitude_setpoint);
   v_box_layout->addWidget(button_plan_to_waypoint);
   v_box_layout->addWidget(button_change_operation_mode);
 
@@ -80,6 +98,8 @@ gbplanner_panel::gbplanner_panel(QWidget* parent) : rviz::Panel(parent) {
   connect(button_homing, SIGNAL(clicked()), this, SLOT(on_homing_click()));
   connect(button_init_motion, SIGNAL(clicked()), this,
           SLOT(on_init_motion_click()));
+  connect(button_altitude_setpoint, SIGNAL(clicked()), this,
+          SLOT(on_altitude_setpoint_click()));
   connect(button_plan_to_waypoint, SIGNAL(clicked()), this,
           SLOT(on_plan_to_waypoint_click()));
   connect(button_global_planner, SIGNAL(clicked()), this,
@@ -125,6 +145,50 @@ void gbplanner_panel::on_init_motion_click() {
     ROS_ERROR("[GBPLANNER-UI] Service call failed: %s",
               planner_client_init_motion.getService().c_str());
   }
+}
+
+void gbplanner_panel::odometry_callback(const nav_msgs::Odometry::ConstPtr& msg) {
+  std::lock_guard<std::mutex> lock(odometry_mutex);
+  latest_odometry = *msg;
+  odometry_received = true;
+}
+
+void gbplanner_panel::on_altitude_setpoint_click() {
+  nav_msgs::Odometry odometry;
+  {
+    std::lock_guard<std::mutex> lock(odometry_mutex);
+    if (!odometry_received) {
+      ROS_ERROR("[GBPLANNER-UI] Cannot send altitude setpoint: no odometry received");
+      return;
+    }
+    odometry = latest_odometry;
+  }
+
+  trajectory_msgs::MultiDOFJointTrajectory trajectory;
+  trajectory.header.stamp = ros::Time::now();
+  trajectory.header.frame_id = altitude_frame_id;
+  trajectory.joint_names.push_back("base_link");
+
+  trajectory_msgs::MultiDOFJointTrajectoryPoint point;
+  geometry_msgs::Transform transform;
+  transform.translation.x = odometry.pose.pose.position.x;
+  transform.translation.y = odometry.pose.pose.position.y;
+  transform.translation.z = altitude_setpoint_z;
+  const geometry_msgs::Quaternion& current_q = odometry.pose.pose.orientation;
+  const double yaw = std::atan2(2.0 * (current_q.w * current_q.z +
+                                       current_q.x * current_q.y),
+                                1.0 - 2.0 * (current_q.y * current_q.y +
+                                             current_q.z * current_q.z));
+  transform.rotation.z = std::sin(0.5 * yaw);
+  transform.rotation.w = std::cos(0.5 * yaw);
+  point.transforms.push_back(transform);
+  point.time_from_start = ros::Duration(0.0);
+  trajectory.points.push_back(point);
+
+  altitude_setpoint_pub.publish(trajectory);
+  ROS_INFO("[GBPLANNER-UI] Sent position setpoint [%.2f, %.2f, %.2f] in %s",
+           transform.translation.x, transform.translation.y,
+           transform.translation.z, altitude_frame_id.c_str());
 }
 
 void gbplanner_panel::on_plan_to_waypoint_click() {

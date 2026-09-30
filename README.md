@@ -151,8 +151,17 @@ roslaunch gbplanner gbplanner_cgn.launch
 ```
 
 This launch file starts the planner, manhole detector, simulation, and AutoAssess bridge together.
-It also loads the inspection target sequencer. Once the planner has a usable global graph,
-start sending the bridge's inspection targets one at a time with:
+It loads `waypoint_reach_bwt.xml` for the automatic **Start Planner** action. This tree
+builds the inspection graph without sending the inspection flight path, then starts
+manhole traversal. Before starting the planner, use **Move to z = 1.0 m** in the CGN
+RViz panel. This keeps the current x, y, and yaw and sends a world-frame z setpoint of
+1.0 m directly to the position controller. Allow the manhole detector to accumulate
+several frames, then start the automatic planner.
+
+The launch also loads the inspection target sequencer. After traversal, stop automatic
+planning before starting the waypoint sequence; both modes send paths to the same
+controller. Once the planner has a usable global graph, start sending the bridge's
+inspection targets one at a time with:
 
 ```bash
 rosservice call /inspection_target_waypoints/start
@@ -162,9 +171,7 @@ In the CGN RViz panel, **Start Inspection Waypoints** calls the same service.
 
 The sequencer waits for each target to be reached before sending the next. It stops if
 a target cannot be reached within 300 seconds; it does not automatically request manhole
-traversal. Avoid starting the separate automatic planning mode while the waypoint sequence
-is running, since both send paths to the same controller. Use
-`inspection_target_waypoints_en:=false` to launch without the sequencer.
+traversal. Use `inspection_target_waypoints_en:=false` to launch without the sequencer.
 
 ## Citation
 

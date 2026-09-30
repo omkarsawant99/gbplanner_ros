@@ -273,6 +273,13 @@ void Inspection::onHalted()
 /*******************************************************/
 
 
+BT::NodeStatus BuildInspectionGraph::tick()
+{
+  ROS_INFO("[BuildInspectionGraph] Preparing global graph from inspection map");
+  return gbplanner_->prepareWaypointGraph() ? BT::NodeStatus::SUCCESS
+                                            : BT::NodeStatus::FAILURE;
+}
+
 /***************** CompartmentTransition **********************/
 BT::NodeStatus CompartmentTransition::onStart()
 {

@@ -688,6 +688,11 @@ Rrg::LocalPlannerStatus Gbplanner::getExplorationPath()
 
 bool Gbplanner::transitionCompartment()
 {
+  if (compartment_counter_ < 0 ||
+      static_cast<size_t>(compartment_counter_ + 1) >= planning_params_.compartment_centers.size()) {
+    ROS_INFO("No next compartment available for opening traversal");
+    return false;
+  }
   rrg_->setNextCompartmentCenter(planning_params_.compartment_centers[compartment_counter_+1]);
   rrg_->setNextCompartmentIndex(compartment_counter_+1);
   BoundedSpaceParams translated_bound = planning_params_.compartment_dimensions;
@@ -848,6 +853,22 @@ bool Gbplanner::getInspectionPath()
     return true;
   else 
     return false;
+}
+
+bool Gbplanner::prepareWaypointGraph()
+{
+  const bool inspection_path_found = getInspectionPath();
+  const size_t inspection_path_size = out_srv_res_.path.size();
+  // The inspection plan is used only to generate the graph in this workflow.
+  out_srv_res_.path.clear();
+  out_srv_res_.status = planner_msgs::planner_srv::Response::kAutoCustomPath;
+  const bool graph_ready = rrg_->commitInspectionGraph();
+  ROS_INFO("Inspection graph preparation: path poses=%zu, graph ready=%s",
+           inspection_path_size, graph_ready ? "true" : "false");
+  if (!inspection_path_found && graph_ready) {
+    ROS_WARN("No inspection flight path was selected, but the global graph is usable");
+  }
+  return graph_ready;
 }
 
 bool Gbplanner::getInspectionPath(planner_msgs::planner_srv::Request& req,
