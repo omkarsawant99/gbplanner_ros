@@ -9,13 +9,19 @@
 	<arg name="organized_range_image_topic" default="/manhole/range_image"/>
 	<arg name="organizer_projection_frame" default="$(arg robot_name)/base_link"/>
 	<arg name="gazebo_gui_en" default="false"/>
-  <arg name="use_sim_time" default="true"/>
-  <arg name="rviz_en" default="true" />
-  <arg name="autoassess_bridge_en" default="true" />
-  <arg name="inspection_target_waypoints_en" default="true" />
-  <arg name="inspection_target_auto_start" default="false" />
-  <arg name="launch_prefix" default=""/> <!-- gdb -ex run //args -->
-  <param name="use_sim_time" value="$(arg use_sim_time)"/>
+	<!-- Use an empty physics world for CGN reference-map simulation. The legacy
+	     BWT collision mesh does not align with the AutoAssess map and can block
+	     an otherwise valid manhole traversal. -->
+	<arg name="simulation_world_file" default="$(find rotors_gazebo)/worlds/empty.world"/>
+	<arg name="rviz_en" default="true" />
+	<arg name="autoassess_bridge_en" default="true" />
+	<arg name="inspection_target_waypoints_en" default="true" />
+	<arg name="inspection_target_auto_start" default="false" />
+	<arg name="launch_prefix" default=""/> <!-- gdb -ex run //args -->
+
+	<arg name="use_sim_time" default="true"/>
+	<param name="use_sim_time" value="$(arg use_sim_time)"/>
+
 
 	<!-- Config files -->
 	<arg name="gbplanner_config_file" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/gbplanner_config_elios3.yaml"/>
@@ -23,7 +29,7 @@
 	<arg name="voxblox_config_file" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/voxblox_config_elios3.yaml"/>
 	<arg name="map_config_file" default="$(arg voxblox_config_file)"/>
 	<arg name="opening_config_file" default="$(find manhole_detector)/config/manhole_detector.yaml"/>
-	<arg name="planner_behaviour_tree" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/waypoint_reach_bwt.xml"/>
+	<arg name="planner_behaviour_tree" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/main_tree_integeration.xml"/>
 
 	<arg name="odometry_topic" default="/rmf_obelix/ground_truth/odometry_throttled"/>
 
@@ -40,6 +46,7 @@
 		<arg name="robot_name" value="$(arg robot_name)"/>
 		<arg name="launch_prefix" value="$(arg launch_prefix)"/>
 		<arg name="gazebo_gui_en" value="$(arg gazebo_gui_en)"/>
+		<arg name="world_file" value="$(arg simulation_world_file)"/>
 	</include>
 
 	<!-- Graph based planning -->
