@@ -29,7 +29,7 @@
 	<arg name="voxblox_config_file" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/voxblox_config_elios3.yaml"/>
 	<arg name="map_config_file" default="$(arg voxblox_config_file)"/>
 	<arg name="opening_config_file" default="$(find manhole_detector)/config/manhole_detector.yaml"/>
-	<arg name="planner_behaviour_tree" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/main_tree_integeration.xml"/>
+	<arg name="planner_behaviour_tree" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/waypoint_reach_bwt.xml"/>
 
 	<arg name="odometry_topic" default="/rmf_obelix/ground_truth/odometry_throttled"/>
 

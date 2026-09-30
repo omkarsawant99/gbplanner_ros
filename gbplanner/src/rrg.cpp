@@ -8275,6 +8275,12 @@ std::vector<geometry_msgs::Pose> Rrg::getOpeningTraversalPath(OpeningTraversalMo
       connecting_path.push_back(first_pose);
       connecting_path.back().orientation = corrected_quat;
       through_path.insert(through_path.begin(), connecting_path.begin(), connecting_path.end());
+      // PCI checks every waypoint's yaw before advancing. The source pose's
+      // old heading can strand PCI on that first waypoint after the vehicle
+      // has already turned toward and reached the opening approach pose.
+      if (!through_path.empty()) {
+        through_path.front().orientation = corrected_quat;
+      }
     }
     else {
       ROS_ERROR_COND(global_verbosity >= Verbosity::PLANNER_STATUS, "Connecting path not found");
