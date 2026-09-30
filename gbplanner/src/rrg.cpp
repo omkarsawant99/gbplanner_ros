@@ -3483,15 +3483,22 @@ ConnectStatus Rrg::findPathToConnect(
 
   // Check a corner case if exists a direct collision-free path to connect
   // source and target.
-  VoxelStatus voxel_state;
+  VoxelStatus voxel_state = VoxelStatus::kUnknown;
   bool try_straight_path = true;
   if (try_straight_path) {
     Eigen::Vector3d src_pos(source[0], source[1], source[2]);
     Eigen::Vector3d tgt_pos(target[0], target[1], target[2]);
-    voxel_state = map_manager_->getPathStatus(
-        src_pos + robot_params_.center_offset,
-        tgt_pos + robot_params_.center_offset, robot_box_size_, false);
-    if (voxel_state == VoxelStatus::kFree) {
+    constexpr double kAlreadyAtTargetDistance = 0.05;
+    const bool already_at_target =
+        (tgt_pos - src_pos).norm() <= kAlreadyAtTargetDistance;
+    if (!already_at_target) {
+      voxel_state = map_manager_->getPathStatus(
+          src_pos + robot_params_.center_offset,
+          tgt_pos + robot_params_.center_offset, robot_box_size_, false);
+    }
+    if (already_at_target || voxel_state == VoxelStatus::kFree) {
+      ROS_INFO_COND(global_verbosity >= Verbosity::INFO && already_at_target,
+                    "Source is already at the connection target");
       ROS_INFO_COND(global_verbosity >= Verbosity::DEBUG, "Try straight path...");
       // Add source to the graph.
       Vertex* source_vertex =
@@ -3512,23 +3519,26 @@ ConnectStatus Rrg::findPathToConnect(
       convertStateToPoseMsg(target, target_pose);
       path_ret.push_back(target_pose);
 
-      // Modify heading angle.
-      Eigen::Vector3d vec(path_ret[1].position.x - path_ret[0].position.x,
-                          path_ret[1].position.y - path_ret[0].position.y,
-                          path_ret[1].position.z - path_ret[0].position.z);
-      double yaw = std::atan2(vec[1], vec[0]);
-      tf::Quaternion quat;
-      // quat.setEuler(0.0, 0.0, yaw);
-      Eigen::Matrix3d rot_eigen;
-      rot_eigen = Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitY()) *
-                Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
-                Eigen::AngleAxisd(0, Eigen::Vector3d::UnitX());
-      rot_eigen = rot_eigen * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitY());
-      Eigen::Quaterniond q_eigen(rot_eigen);
-      path_ret[1].orientation.x = q_eigen.x();
-      path_ret[1].orientation.y = q_eigen.y();
-      path_ret[1].orientation.z = q_eigen.z();
-      path_ret[1].orientation.w = q_eigen.w();
+      // For a real displacement, point the target along the path. When the
+      // robot is already at the target, retain the requested target heading;
+      // a near-zero displacement has no meaningful direction.
+      if (!already_at_target) {
+        Eigen::Vector3d vec(path_ret[1].position.x - path_ret[0].position.x,
+                            path_ret[1].position.y - path_ret[0].position.y,
+                            path_ret[1].position.z - path_ret[0].position.z);
+        double yaw = std::atan2(vec[1], vec[0]);
+        Eigen::Matrix3d rot_eigen;
+        rot_eigen = Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitY()) *
+                    Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
+                    Eigen::AngleAxisd(0, Eigen::Vector3d::UnitX());
+        rot_eigen = rot_eigen *
+                    Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitY());
+        Eigen::Quaterniond q_eigen(rot_eigen);
+        path_ret[1].orientation.x = q_eigen.x();
+        path_ret[1].orientation.y = q_eigen.y();
+        path_ret[1].orientation.z = q_eigen.z();
+        path_ret[1].orientation.w = q_eigen.w();
+      }
 
       status = ConnectStatus::kSuccess;
       return status;
@@ -3570,24 +3580,25 @@ ConnectStatus Rrg::findPathToConnect(
   random_sampler_to_search_.reset();
   bool stop_sampling = false;
   while (!stop_sampling) {
+    ++loop_count;
     Vertex new_vertex(-1, StateVec::Zero());
-    if (!sampleVertex(random_sampler_to_search_, source, new_vertex)) continue;
-    // StateVec &new_state = new_vertex->state;
-    ExpandGraphReport rep;
-    expandGraph(graph_manager, new_vertex, rep);
-    if (rep.status == ExpandGraphStatus::kSuccess) {
-      num_vertices += rep.num_vertices_added;
-      num_edges += rep.num_edges_added;
-      // Check if this state reached the target.
-      Eigen::Vector3d radius_vec(new_vertex.state[0] - target[0],
-                                 new_vertex.state[1] - target[1],
-                                 new_vertex.state[2] - target[2]);
-      if (radius_vec.norm() < params.reached_target_radius) {
-        target_neigbors.push_back(rep.vertex_added);
-        reached_target = true;
-        ++num_paths_to_target;
-        if (num_paths_to_target > params.num_paths_to_target_max)
-          stop_sampling = true;
+    if (sampleVertex(random_sampler_to_search_, source, new_vertex)) {
+      ExpandGraphReport rep;
+      expandGraph(graph_manager, new_vertex, rep);
+      if (rep.status == ExpandGraphStatus::kSuccess) {
+        num_vertices += rep.num_vertices_added;
+        num_edges += rep.num_edges_added;
+        // Check if this state reached the target.
+        Eigen::Vector3d radius_vec(new_vertex.state[0] - target[0],
+                                   new_vertex.state[1] - target[1],
+                                   new_vertex.state[2] - target[2]);
+        if (radius_vec.norm() < params.reached_target_radius) {
+          target_neigbors.push_back(rep.vertex_added);
+          reached_target = true;
+          ++num_paths_to_target;
+          if (num_paths_to_target > params.num_paths_to_target_max)
+            stop_sampling = true;
+        }
       }
     }
     if ((loop_count >= params.num_loops_cutoff) &&
@@ -3595,9 +3606,9 @@ ConnectStatus Rrg::findPathToConnect(
       stop_sampling = true;
     }
 
-    if ((loop_count++ > params.num_loops_max) ||
-        (num_vertices > params.num_vertices_max) ||
-        (num_edges > params.num_edges_max))
+    if ((loop_count >= params.num_loops_max) ||
+        (num_vertices >= params.num_vertices_max) ||
+        (num_edges >= params.num_edges_max))
       stop_sampling = true;
   }
   ROS_INFO_COND(global_verbosity >= Verbosity::DEBUG, "Built a graph with %d vertices and %d edges.",
