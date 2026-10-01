@@ -18,6 +18,8 @@
   <depend>planner_common</depend>
   <depend>map_manager</depend>
   <depend>planner_msgs</depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
   <depend>planner_semantic_msgs</depend>
   <depend>adaptive_obb</depend>
   <depend>pcl_ros</depend>

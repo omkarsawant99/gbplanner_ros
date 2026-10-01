@@ -521,6 +521,37 @@ Visualization Manager:
       Queue Size: 100
       Value: false
     - Alpha: 1
+      Arrow Length: 0.4000000059604645
+      Axes Length: 0.30000001192092896
+      Axes Radius: 0.009999999776482582
+      Class: rviz/PoseArray
+      Color: 0; 220; 255
+      Enabled: true
+      Head Length: 0.12999999523162842
+      Head Radius: 0.09000000357627869
+      Name: AutoAssess Inspection Targets
+      Queue Size: 10
+      Shaft Length: 0.27000001072883606
+      Shaft Radius: 0.03999999910593033
+      Shape: Arrow (3D)
+      Topic: /autoassess/inspection_targets
+      Unreliable: false
+      Value: true
+    - Alpha: 1
+      Axes Length: 0.3
+      Axes Radius: 0.03
+      Class: rviz/Pose
+      Color: 255; 170; 0
+      Enabled: true
+      Head Length: 0.15
+      Head Radius: 0.08
+      Name: Reachable Inspection Waypoint
+      Shaft Length: 0.3
+      Shaft Radius: 0.04
+      Shape: Arrow
+      Topic: /gbplanner/inspection_waypoint
+      Value: true
+    - Alpha: 1
       Arrow Length: 0.30000001192092896
       Axes Length: 0.30000001192092896
       Axes Radius: 0.009999999776482582

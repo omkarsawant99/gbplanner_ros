@@ -151,27 +151,49 @@ roslaunch gbplanner gbplanner_cgn.launch
 ```
 
 This launch file starts the planner, manhole detector, simulation, and AutoAssess bridge together.
-It loads `waypoint_reach_bwt.xml` for the automatic **Start Planner** action. This tree
-builds the inspection graph without sending the inspection flight path, then starts
-manhole traversal. Before starting the planner, use **Move to z = 1.0 m** in the CGN
-RViz panel. This keeps the current x, y, and yaw and sends a world-frame z setpoint of
-1.0 m directly to the position controller. Allow the manhole detector to accumulate
-several frames, then start the automatic planner.
-
-The launch also loads the inspection target sequencer. After traversal, stop automatic
-planning before starting the waypoint sequence; both modes send paths to the same
-controller. Once the planner has a usable global graph, start sending the bridge's
-inspection targets one at a time with:
+It loads `waypoint_reach_bwt.xml`. Press **NDT waypoint navigation** in the CGN RViz
+panel. The UI sends the existing position controller a world-frame setpoint at z = 1.0 m
+while preserving x, y, and yaw. After odometry shows a stable hover for three seconds,
+it starts automatic planning. In each compartment, the planner builds its inspection
+graph but discards the inspection path, then selects unfinished target poses published by
+the bridge one at a time. Once those targets are reached, it traverses the manhole and repeats.
+RViz displays the bridge's `/autoassess/inspection_targets` poses as cyan arrows.
+**Stop Planner** also cancels the altitude and hover stage. If the vehicle is already
+positioned, automatic planning can be started directly with:
 
 ```bash
-rosservice call /inspection_target_waypoints/start
+rosservice call /planner_control_interface/std_srvs/automatic_planning
 ```
 
-In the CGN RViz panel, **Start Inspection Waypoints** calls the same service.
-
-The sequencer waits for each target to be reached before sending the next. It stops if
-a target cannot be reached within 300 seconds; it does not automatically request manhole
-traversal. Use `inspection_target_waypoints_en:=false` to launch without the sequencer.
+The planner classifies each target between the detected entry and exit wall planes.
+The entry wall is the manhole used for the previous traversal; the exit wall is selected
+with the same opening-selection routine used for the next traversal. Missing exit
+walls make the tree wait. Wall normals are oriented along mission progress, so tilted
+walls and reversed detector normals are handled. Within 5 cm of a wall, target viewing
+direction resolves which side should inspect it. Targets in other compartments are
+deferred and completed targets are remembered across traversals.
+Inspection arrival requires remaining within `inspection_waypoint_reach_radius_m`
+(default 0.15 m) for `inspection_waypoint_hold_s` (default 1.0 s of ROS time).
+Leaving that radius resets the dwell. The planner first tries the requested position,
+then searches nearest-first on a 3D lattice for a reachable free pose in the same
+compartment. `inspection_waypoint_search_radius_m` defaults to 1.0 m and
+`inspection_waypoint_search_resolution_m` to 0.1 m. Up to
+`inspection_waypoint_search_attempts` (default 8) free candidates are checked for a
+route per planning attempt. This is a bounded sampled search, not an exact continuous
+nearest-point solution. Unknown and occupied robot boxes and blocked path segments
+are rejected. The adjusted goal retains the requested viewing orientation; the
+flight path uses level poses with yaw, as expected by the position controller.
+The selected goal appears in orange as **Reachable Inspection Waypoint** on
+`/gbplanner/inspection_waypoint`; the bridge's original targets remain cyan. Arrival
+and the dwell use that selected goal, while completion refers to the original target
+ID. Failed searches keep the target pending. These checks cover robot clearance and
+path validity in the current map, but do not verify inspection visibility from the adjusted pose.
+The first compartment has no entry plane; the last has no exit plane. Configured
+compartment centers still specify mission order and direction, and configured planning
+bounds still constrain graph generation. This assumes a sequence of compartments
+separated by manhole walls. The bridge supplies poses only.
+The old standalone waypoint sequencer remains available with
+`inspection_target_waypoints_en:=true`, but it must not run alongside this tree.
 
 ## Citation
 

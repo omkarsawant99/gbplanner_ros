@@ -29,6 +29,11 @@ cs_add_library(
 cs_add_executable(gbplanner_node src/gbplanner_ros_node.cpp)
 target_link_libraries(gbplanner_node ${PROJECT_NAME} ${planner_common_LIBRARIES})
 
+catkin_install_python(PROGRAMS
+  scripts/inspection_target_compartments.py
+  scripts/compartments.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
 cs_install()
 cs_export(LIBRARIES)
-

@@ -15,8 +15,15 @@
 	<arg name="simulation_world_file" default="$(find rotors_gazebo)/worlds/empty.world"/>
 	<arg name="rviz_en" default="true" />
 	<arg name="autoassess_bridge_en" default="true" />
-	<arg name="inspection_target_waypoints_en" default="true" />
+	<arg name="inspection_target_waypoints_en" default="false" />
 	<arg name="inspection_target_auto_start" default="false" />
+	<arg name="inspection_start_altitude_m" default="1.0" />
+	<arg name="inspection_hover_s" default="3.0" />
+	<arg name="inspection_waypoint_reach_radius_m" default="0.15" />
+	<arg name="inspection_waypoint_hold_s" default="1.0" />
+	<arg name="inspection_waypoint_search_radius_m" default="1.0" />
+	<arg name="inspection_waypoint_search_resolution_m" default="0.1" />
+	<arg name="inspection_waypoint_search_attempts" default="8" />
 	<arg name="launch_prefix" default=""/> <!-- gdb -ex run //args -->
 
 	<arg name="use_sim_time" default="true"/>
@@ -39,6 +46,10 @@
 		<arg name="inspection_target_waypoints_en" value="$(arg inspection_target_waypoints_en)"/>
 		<arg name="inspection_target_auto_start" value="$(arg inspection_target_auto_start)"/>
 	</include>
+	<node if="$(arg autoassess_bridge_en)" pkg="gbplanner"
+	      type="inspection_target_compartments.py" name="inspection_target_compartments" output="screen">
+		<param name="world_frame" value="$(arg world_frame)"/>
+	</node>
 
 
 	<!-- Simulation -->
@@ -62,6 +73,11 @@
 		<param name="behavior_tree_path" value="$(arg planner_behaviour_tree)"/>
 		<param name="opening_detection_wait_s" value="15.0"/>
 		<param name="opening_forward_only" value="true"/>
+		<param name="inspection_waypoint_reach_radius_m" value="$(arg inspection_waypoint_reach_radius_m)"/>
+		<param name="inspection_waypoint_hold_s" value="$(arg inspection_waypoint_hold_s)"/>
+		<param name="inspection_waypoint_search_radius_m" value="$(arg inspection_waypoint_search_radius_m)"/>
+		<param name="inspection_waypoint_search_resolution_m" value="$(arg inspection_waypoint_search_resolution_m)"/>
+		<param name="inspection_waypoint_search_attempts" value="$(arg inspection_waypoint_search_attempts)"/>
 	</node>
 
 	<!-- Planner and Control Interface -->
@@ -106,11 +122,13 @@
 	
 	<!-- Rviz -->
 	<node pkg="rviz" type="rviz" name="gbplanner_ui" output="screen" args="-d $(find gbplanner)/config/$(arg config_folder)/ui.rviz">
-		<param if="$(arg inspection_target_waypoints_en)" name="waypoint_service" value="/inspection_target_waypoints/start"/>
-		<param if="$(arg inspection_target_waypoints_en)" name="waypoint_button_label" value="Start Inspection Waypoints"/>
+		<param name="waypoint_service" value="/planner_control_interface/std_srvs/automatic_planning"/>
+		<param name="waypoint_button_label" value="NDT waypoint navigation"/>
+		<param name="inspection_waypoint_sequence" value="true"/>
+		<param name="inspection_hover_s" value="$(arg inspection_hover_s)"/>
 		<param name="altitude_command_topic" value="/$(arg robot_name)/command/trajectory"/>
 		<param name="altitude_odometry_topic" value="$(arg odometry_topic)"/>
-		<param name="altitude_setpoint_z" value="1.0"/>
+		<param name="altitude_setpoint_z" value="$(arg inspection_start_altitude_m)"/>
 		<param name="altitude_frame_id" value="$(arg world_frame)"/>
 	</node>
 

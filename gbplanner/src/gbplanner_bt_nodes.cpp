@@ -273,11 +273,21 @@ void Inspection::onHalted()
 /*******************************************************/
 
 
-BT::NodeStatus BuildInspectionGraph::tick()
+BT::NodeStatus BuildInspectionGraph::onStart()
 {
   ROS_INFO("[BuildInspectionGraph] Preparing global graph from inspection map");
-  return gbplanner_->prepareWaypointGraph() ? BT::NodeStatus::SUCCESS
-                                            : BT::NodeStatus::FAILURE;
+  if (gbplanner_->prepareWaypointGraph()) return BT::NodeStatus::SUCCESS;
+  next_retry_ = ros::WallTime::now() + ros::WallDuration(2.0);
+  return BT::NodeStatus::RUNNING;
+}
+
+BT::NodeStatus BuildInspectionGraph::onRunning()
+{
+  if (ros::WallTime::now() < next_retry_) return BT::NodeStatus::RUNNING;
+  if (gbplanner_->prepareWaypointGraph()) return BT::NodeStatus::SUCCESS;
+  next_retry_ = ros::WallTime::now() + ros::WallDuration(2.0);
+  ROS_WARN_THROTTLE(5.0, "Inspection graph not ready; retrying");
+  return BT::NodeStatus::RUNNING;
 }
 
 /***************** CompartmentTransition **********************/
@@ -586,6 +596,109 @@ BT::NodeStatus SetNextCompartment::tick()
   }
 }
 /*******************************************************/
+
+BT::NodeStatus BeginWaypointCompartment::tick()
+{
+  return gbplanner_->beginWaypointCompartment() ? BT::NodeStatus::SUCCESS
+                                                 : BT::NodeStatus::FAILURE;
+}
+
+BT::NodeStatus InspectionWaypoint::step()
+{
+  gbplanner_->out_srv_res_.path.clear();
+  gbplanner_->out_srv_res_.status = planner_msgs::planner_srv::Response::kAutoCustomPath;
+  const int compartment = gbplanner_->currentWaypointCompartment();
+  if (compartment < 0 || !gbplanner_->hasWaypointOdometry()) {
+    ROS_WARN_THROTTLE(5.0, "Waiting for waypoint compartment and odometry");
+    return BT::NodeStatus::RUNNING;
+  }
+  if (compartment != compartment_index_) {
+    compartment_index_ = compartment;
+    target_index_ = -1;
+    target_resolved_ = false;
+    revision_.clear();
+    next_path_retry_ = ros::WallTime();
+    reached_since_ = ros::Time();
+  }
+
+  const bool within_target = target_resolved_ && target_index_ >= 0 &&
+      gbplanner_->waypointTargetReached(target_, reach_radius_m_);
+  const ros::Time now = ros::Time::now();
+  if (!within_target) reached_since_ = ros::Time();
+  else if (reached_since_.isZero() || now < reached_since_) reached_since_ = now;
+  const bool reached = within_target &&
+      (now - reached_since_).toSec() >= reach_hold_s_;
+  planner_msgs::GetInspectionTarget service;
+  bool has_entry_wall = false, has_exit_wall = false;
+  if (!gbplanner_->waypointCompartmentWalls(
+          service.request.entry_wall, has_entry_wall,
+          service.request.exit_wall, has_exit_wall,
+          service.request.forward)) {
+    return BT::NodeStatus::RUNNING;
+  }
+  service.request.has_entry_wall = has_entry_wall;
+  service.request.has_exit_wall = has_exit_wall;
+  service.request.compartment_index = compartment;
+  service.request.completed_target_index = reached ? target_index_ : -1;
+  service.request.completed_revision = reached ? revision_ : "";
+  if (!target_client_.waitForExistence(ros::Duration(0.5)) || !target_client_.call(service)) {
+    ROS_WARN_THROTTLE(5.0, "Waiting for AutoAssess compartment target service");
+    return BT::NodeStatus::RUNNING;
+  }
+  const auto& result = service.response;
+  if (!result.ready) {
+    ROS_WARN_THROTTLE(5.0, "Inspection targets unavailable: %s", result.message.c_str());
+    return BT::NodeStatus::RUNNING;
+  }
+  if (target_index_ >= 0 && revision_ != result.revision) {
+    ROS_WARN("AutoAssess target plan changed; discarding previous waypoint");
+    target_index_ = -1;
+    target_resolved_ = false;
+    next_path_retry_ = ros::WallTime();
+    reached_since_ = ros::Time();
+  }
+  if (reached && result.revision == revision_) {
+    ROS_INFO("Inspection target %d reached: within %.2f m for %.1f s",
+             target_index_, reach_radius_m_, reach_hold_s_);
+    target_index_ = -1;
+    target_resolved_ = false;
+    reached_since_ = ros::Time();
+  }
+  if (!result.has_target) {
+    ROS_INFO("No remaining AutoAssess targets in compartment %d", compartment);
+    return BT::NodeStatus::FAILURE;
+  }
+  if (target_index_ != result.target_index) {
+    target_index_ = result.target_index;
+    requested_target_ = result.target;
+    target_ = result.target;
+    target_resolved_ = false;
+    revision_ = result.revision;
+    next_path_retry_ = ros::WallTime();
+    reached_since_ = ros::Time();
+    ROS_INFO("Planning to AutoAssess target %d in compartment %d",
+             target_index_, compartment);
+  }
+  if (target_resolved_ && gbplanner_->waypointTargetReached(target_, reach_radius_m_)) {
+    // Keep the controller's endpoint setpoint while the arrival dwell elapses.
+    return BT::NodeStatus::RUNNING;
+  }
+  if (ros::WallTime::now() < next_path_retry_) {
+    return BT::NodeStatus::RUNNING;
+  }
+  if (!gbplanner_->planWaypointTarget(requested_target_, target_)) {
+    ROS_WARN_THROTTLE(5.0, "No graph path to AutoAssess target %d; retaining it", target_index_);
+    next_path_retry_ = ros::WallTime::now() + ros::WallDuration(2.0);
+    return BT::NodeStatus::RUNNING;
+  }
+  target_resolved_ = true;
+  reached_since_ = ros::Time();
+  if (gbplanner_->waypointTargetReached(target_, reach_radius_m_)) {
+    gbplanner_->out_srv_res_.path.clear();
+    return BT::NodeStatus::RUNNING;
+  }
+  return BT::NodeStatus::SUCCESS;
+}
 
 /***************** AllCompartmentsInspectedCheck **************/
 BT::NodeStatus AllCompartmentsInspectedCheck::tick()

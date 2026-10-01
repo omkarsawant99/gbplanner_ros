@@ -1,4 +1,5 @@
 #include "gbplanner/rrg.h"
+#include "gbplanner/waypoint_candidates.h"
 
 #include <opencv2/highgui.hpp>
 #include <opencv2/opencv.hpp>
@@ -28,6 +29,7 @@ Rrg::Rrg(const ros::NodeHandle& nh, const ros::NodeHandle& nh_private,
 }
 
 void Rrg::initializeAttributes() {
+  inspection_waypoint_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("gbplanner/inspection_waypoint", 1, true);
   visualization_ = new Visualization(nh_, nh_private_);
 
   geofence_manager_.reset(new GeofenceManager());
@@ -4642,6 +4644,112 @@ std::vector<geometry_msgs::Pose> Rrg::searchHomingPath(
   return ret_path;
 }
 
+bool Rrg::planInspectionWaypoint(const geometry_msgs::PoseStamped& requested,
+    const geometry_msgs::Pose* entry, const geometry_msgs::Pose* exit,
+    const Eigen::Vector3d& forward, geometry_msgs::PoseStamped& adjusted,
+    std::vector<geometry_msgs::Pose>& path) {
+  path.clear();
+  double radius, resolution;
+  int max_attempts;
+  nh_private_.param("inspection_waypoint_search_radius_m", radius, 1.0);
+  nh_private_.param("inspection_waypoint_search_resolution_m", resolution, 0.1);
+  nh_private_.param("inspection_waypoint_search_attempts", max_attempts, 8);
+  std::vector<std::array<double, 3>> offsets;
+  try { offsets = inspection_waypoints::candidateOffsets(radius, resolution); }
+  catch (const std::invalid_argument& e) { ROS_ERROR_THROTTLE(5.0, "%s", e.what()); return false; }
+  if (max_attempts < 1 || !forward.allFinite() || forward.norm() < 1e-6) return false;
+  auto position = [](const geometry_msgs::Pose& p) {
+    return Eigen::Vector3d(p.position.x, p.position.y, p.position.z);
+  };
+  const Eigen::Vector3d goal = position(requested.pose);
+  if (!goal.allFinite()) return false;
+  std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> planes;
+  for (const auto* wall : {entry, exit}) {
+    if (!wall) continue;
+    Eigen::Quaterniond q(wall->orientation.w, wall->orientation.x,
+                         wall->orientation.y, wall->orientation.z);
+    if (!q.coeffs().allFinite() || q.norm() < 1e-6) return false;
+    Eigen::Vector3d normal = q.normalized() * Eigen::Vector3d::UnitX();
+    if (normal.dot(forward) < 0) normal = -normal;
+    if (wall == exit) normal = -normal;
+    planes.emplace_back(position(*wall), normal);
+  }
+  auto in_compartment = [&](const Eigen::Vector3d& p) {
+    for (const auto& plane : planes)
+      if ((p - plane.first).dot(plane.second) < -1e-6) return false;
+    return true;
+  };
+  auto free_pose = [&](const Eigen::Vector3d& p) {
+    if (!p.allFinite() || !in_compartment(p)) return false;
+    const Eigen::Vector3d center = p + robot_params_.center_offset;
+    if (planning_params_.geofence_checking_enable &&
+        geofence_manager_->getBoxStatus(center.head<2>(), robot_box_size_.head<2>()) ==
+        GeofenceManager::CoordinateStatus::kViolated) return false;
+    return map_manager_->getBoxStatus(center, robot_box_size_, true) == VoxelStatus::kFree;
+  };
+  auto free_segment = [&](const Eigen::Vector3d& a, const Eigen::Vector3d& b) {
+    if (!free_pose(a) || !free_pose(b)) return false;
+    const Eigen::Vector3d ca = a + robot_params_.center_offset;
+    const Eigen::Vector3d cb = b + robot_params_.center_offset;
+    if (planning_params_.geofence_checking_enable &&
+        geofence_manager_->getPathStatus(ca.head<2>(), cb.head<2>(), robot_box_size_.head<2>()) ==
+        GeofenceManager::CoordinateStatus::kViolated) return false;
+    if ((ca-cb).squaredNorm() < 1e-12) return true;
+    return map_manager_->getPathStatus(ca, cb, robot_box_size_, true) == VoxelStatus::kFree;
+  };
+  geometry_msgs::Pose current;
+  current.position.x = current_state_[0];
+  current.position.y = current_state_[1];
+  current.position.z = current_state_[2];
+  current.orientation = tf::createQuaternionMsgFromYaw(current_state_[3]);
+  if (!free_pose(position(current))) {
+    ROS_WARN_THROTTLE(5.0, "Inspection waypoint start lacks free robot clearance in the current compartment");
+    return false;
+  }
+  // Validate every graph/search segment against the current map. Search may
+  // return a nearby graph vertex, so explicitly check the final goal connection.
+  auto finish_path = [&](std::vector<geometry_msgs::Pose>& route, const geometry_msgs::Pose& candidate) {
+    if (route.empty()) return false;
+    route.insert(route.begin(), current);
+    route.push_back(candidate);
+    for (size_t i = 1; i < route.size(); ++i)
+      if (!free_segment(position(route[i-1]), position(route[i]))) return false;
+    return true;
+  };
+  int attempts = 0;
+  for (const auto& offset : offsets) {
+    geometry_msgs::PoseStamped candidate = requested;
+    candidate.pose.position.x += offset[0];
+    candidate.pose.position.y += offset[1];
+    candidate.pose.position.z += offset[2];
+    const Eigen::Vector3d p = position(candidate.pose);
+    if (!free_pose(p)) continue;
+    if (++attempts > max_attempts) break;
+    std::vector<geometry_msgs::Pose> route;
+    bool connected = free_segment(position(current), p);
+    if (connected) route = {current, candidate.pose};
+    else {
+      route = getGlobalPath(candidate);
+      connected = finish_path(route, candidate.pose);
+      if (!connected) {
+        route.clear();
+        connected = search(current, candidate.pose, false, route) && finish_path(route, candidate.pose);
+      }
+    }
+    if (!connected) continue;
+    adjusted = candidate;
+    adjusted.header.stamp = ros::Time::now();
+    path = std::move(route);
+    inspection_waypoint_pub_.publish(adjusted);
+    ROS_INFO("Inspection waypoint offset %.2f m: requested [%.3f, %.3f, %.3f], reachable [%.3f, %.3f, %.3f]",
+             (p-goal).norm(), goal.x(), goal.y(), goal.z(), p.x(), p.y(), p.z());
+    return true;
+  }
+  ROS_WARN_THROTTLE(5.0, "No reachable inspection pose within %.2f m (%d free candidates tried); retaining target",
+                    radius, std::min(attempts, max_attempts));
+  return false;
+}
+
 std::vector<geometry_msgs::Pose> Rrg::getGlobalPath(
     geometry_msgs::PoseStamped& waypoint) {
   std::vector<geometry_msgs::Pose> ret_path;
@@ -4746,6 +4854,9 @@ std::vector<geometry_msgs::Pose> Rrg::getGlobalPath(
     }
   }
 
+  if (!connect_state_to_graph || link_vertex == NULL) {
+    return ret_path;
+  }
   ROS_WARN_COND(global_verbosity >= Verbosity::WARN, "Finding a path from current[%d] to vertex[%d].", link_vertex->id,
            wp_nearest_vertex->id);
 
@@ -8050,6 +8161,93 @@ void Rrg::setNextCompartmentCenter(Eigen::Vector3d &center)
   next_compartment_ = center;
 }
 
+std::shared_ptr<Opening> Rrg::selectNextOpening() {
+  if (waypoint_boundary_id_ >= 0) {
+    auto it = detected_openings_.find(waypoint_boundary_id_);
+    if (it != detected_openings_.end() && it->second->active &&
+        it->second->num_tries < planning_params_.max_opening_attempts)
+      return it->second;
+    return nullptr;
+  }
+  std::shared_ptr<Opening> best_opening;
+  double closest_distance = std::numeric_limits<double>::max();
+  bool found = false;
+  bool opening_forward_only = false;
+  nh_private_.param("opening_forward_only", opening_forward_only, false);
+  for(auto it : detected_openings_) {
+    std::shared_ptr<Opening> current_opening = it.second;
+    if(!current_opening->active || current_opening->num_tries >= planning_params_.max_opening_attempts) {
+      /* TODO: Update active status of all the semantics based on this */
+      continue;
+    }
+
+    // The compartment centers define the mission's forward direction.
+    // Robot yaw can point backward after inspection, so filter by progress
+    // toward the next compartment instead of by the robot's current yaw.
+    if(opening_forward_only && next_compartment_index_ > 0 &&
+       next_compartment_index_ < static_cast<int>(planning_params_.compartment_centers.size())) {
+      const Eigen::Vector3d forward =
+          planning_params_.compartment_centers[next_compartment_index_] -
+          planning_params_.compartment_centers[next_compartment_index_ - 1];
+      const Eigen::Vector3d robot_to_opening(
+          current_opening->pose.position.x - current_state_[0],
+          current_opening->pose.position.y - current_state_[1], 0.0);
+      if(forward.head<2>().squaredNorm() > 1e-6 &&
+         forward.head<2>().dot(robot_to_opening.head<2>()) <= 0.0) {
+        continue;
+      }
+    }
+
+    if(planning_params_.exploration_only)  // If exploration only, go to the closest opening
+    {
+      double opening_robot_dist = (current_state_.head(3)
+            - Eigen::Vector3d(current_opening->pose.position.x,
+                              current_opening->pose.position.y,
+                              current_opening->pose.position.z)).norm();
+      if(opening_robot_dist < closest_distance) {
+        closest_distance = opening_robot_dist;
+        best_opening = current_opening;
+        found = true;
+      }
+    }
+    else // If exploration + inspection, find the opening that leads to the next compartment
+    {
+      double opening_robot_dist = (planning_params_.compartment_centers[next_compartment_index_-1] - Eigen::Vector3d(current_opening->pose.position.x, current_opening->pose.position.y, current_opening->pose.position.z)).norm();
+      Eigen::Vector3d compartment_dim = planning_params_.compartment_dimensions.max_val - planning_params_.compartment_dimensions.min_val;
+      if(opening_robot_dist > compartment_dim.norm()/2.0)
+      {
+        continue;
+      }
+      double dist;
+      if(next_compartment_.x() < std::numeric_limits<double>::max())
+        dist = (next_compartment_ - Eigen::Vector3d(current_opening->pose.position.x, current_opening->pose.position.y, current_opening->pose.position.z)).norm();
+      else
+        dist = (current_state_.head(3) - Eigen::Vector3d(current_opening->pose.position.x, current_opening->pose.position.y, current_opening->pose.position.z)).norm();
+      if(dist < closest_distance) {
+        closest_distance = dist;
+        best_opening = current_opening;
+        found = true;
+      }
+    }
+  }
+  return found ? best_opening : nullptr;
+}
+
+bool Rrg::getWaypointExitWall(geometry_msgs::Pose& wall) {
+  auto opening = selectNextOpening();
+  if (!opening) return false;
+  waypoint_boundary_id_ = opening->id;
+  wall = opening->pose;
+  return true;
+}
+
+bool Rrg::getSelectedOpeningPose(geometry_msgs::Pose& wall) const {
+  auto it = detected_openings_.find(opening_under_execution_);
+  if (it == detected_openings_.end()) return false;
+  wall = it->second->pose;
+  return true;
+}
+
 std::vector<geometry_msgs::Pose> Rrg::getOpeningTraversalPath(OpeningTraversalMode mode, OpeningTraversalStatus &status) {
 	std::vector<geometry_msgs::Pose> through_path;
 
@@ -8070,7 +8268,7 @@ std::vector<geometry_msgs::Pose> Rrg::getOpeningTraversalPath(OpeningTraversalMo
 
   if(mode == OpeningTraversalMode::kPathCheck)
   {
-    if(opening_still_exists) 
+    if(opening_still_exists)
     {
       status = OpeningTraversalStatus::OK;
       return through_path;
@@ -8092,68 +8290,10 @@ std::vector<geometry_msgs::Pose> Rrg::getOpeningTraversalPath(OpeningTraversalMo
 	}
 
   std::shared_ptr<Opening> best_opening;
-	double closest_distance = std::numeric_limits<double>::max();
   bool found = false;
   if(mode == OpeningTraversalMode::kGoingTo) {
-    bool opening_forward_only = false;
-    nh_private_.param("opening_forward_only", opening_forward_only, false);
-  // if(mode != OpeningTraversalMode::kPassingThrough && mode != OpeningTraversalMode::kPathCheck) {
-    for(auto it : detected_openings_) {
-      std::shared_ptr<Opening> current_opening = it.second;
-      if(!current_opening->active || current_opening->num_tries >= planning_params_.max_opening_attempts) {
-        /* TODO: Update active status of all the semantics based on this */
-        continue;
-      }
-
-      // The compartment centers define the mission's forward direction.
-      // Robot yaw can point backward after inspection, so filter by progress
-      // toward the next compartment instead of by the robot's current yaw.
-      if(opening_forward_only && next_compartment_index_ > 0 &&
-         next_compartment_index_ < static_cast<int>(planning_params_.compartment_centers.size())) {
-        const Eigen::Vector3d forward =
-            planning_params_.compartment_centers[next_compartment_index_] -
-            planning_params_.compartment_centers[next_compartment_index_ - 1];
-        const Eigen::Vector3d robot_to_opening(
-            current_opening->pose.position.x - current_state_[0],
-            current_opening->pose.position.y - current_state_[1], 0.0);
-        if(forward.head<2>().squaredNorm() > 1e-6 &&
-           forward.head<2>().dot(robot_to_opening.head<2>()) <= 0.0) {
-          continue;
-        }
-      }
-      
-      if(planning_params_.exploration_only)  // If exploration only, go to the closest opening
-      {
-        double opening_robot_dist = (current_state_.head(3) 
-              - Eigen::Vector3d(current_opening->pose.position.x, 
-                                current_opening->pose.position.y, 
-                                current_opening->pose.position.z)).norm();
-        if(opening_robot_dist < closest_distance) {
-          closest_distance = opening_robot_dist;
-          best_opening = current_opening;
-          found = true;
-        }
-      }
-      else // If exploration + inspection, find the opening that leads to the next compartment
-      {
-        double opening_robot_dist = (planning_params_.compartment_centers[next_compartment_index_-1] - Eigen::Vector3d(current_opening->pose.position.x, current_opening->pose.position.y, current_opening->pose.position.z)).norm();
-        Eigen::Vector3d compartment_dim = planning_params_.compartment_dimensions.max_val - planning_params_.compartment_dimensions.min_val;
-        if(opening_robot_dist > compartment_dim.norm()/2.0)
-        {
-          continue;
-        }
-        double dist;
-        if(next_compartment_.x() < std::numeric_limits<double>::max())
-          dist = (next_compartment_ - Eigen::Vector3d(current_opening->pose.position.x, current_opening->pose.position.y, current_opening->pose.position.z)).norm();
-        else
-          dist = (current_state_.head(3) - Eigen::Vector3d(current_opening->pose.position.x, current_opening->pose.position.y, current_opening->pose.position.z)).norm();
-        if(dist < closest_distance) {
-          closest_distance = dist;
-          best_opening = current_opening;
-          found = true;
-        }
-      }
-    }
+    best_opening = selectNextOpening();
+    found = static_cast<bool>(best_opening);
     if(found)
       opening_under_execution_ = best_opening->id;
   }

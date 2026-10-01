@@ -1,11 +1,14 @@
 #pragma once
 
+#include <cmath>
+
 #include "behaviortree_cpp/bt_factory.h"
 #include "behaviortree_cpp/loggers/groot2_publisher.h"
 #include "behaviortree_cpp/tree_node.h"
 #include "behaviortree_cpp/xml_parsing.h"
 
 #include "gbplanner/gbplanner.h"
+#include "planner_msgs/GetInspectionTarget.h"
 
 /*
 Returns:
@@ -315,18 +318,21 @@ private:
 
 
 // Build an inspection graph for waypoint routing without returning its flight path.
-class BuildInspectionGraph : public BT::SyncActionNode
+class BuildInspectionGraph : public BT::StatefulActionNode
 {
 public:
   BuildInspectionGraph(const std::string& name, const BT::NodeConfig& config,
                        std::shared_ptr<Gbplanner> gbplanner)
-    : SyncActionNode(name, config), gbplanner_(std::move(gbplanner)) {}
+    : StatefulActionNode(name, config), gbplanner_(std::move(gbplanner)) {}
 
   static BT::PortsList providedPorts() { return {}; }
-  BT::NodeStatus tick() override;
+  BT::NodeStatus onStart() override;
+  BT::NodeStatus onRunning() override;
+  void onHalted() override {}
 
 private:
   std::shared_ptr<Gbplanner> gbplanner_;
+  ros::WallTime next_retry_;
 };
 
 
@@ -584,6 +590,57 @@ public:
 
 private:
   std::shared_ptr<Gbplanner> gbplanner_;
+};
+
+// Prepare one compartment, including the final compartment with no next opening.
+class BeginWaypointCompartment : public BT::SyncActionNode
+{
+public:
+  BeginWaypointCompartment(const std::string& name, const BT::NodeConfig& config,
+                           std::shared_ptr<Gbplanner> gbplanner)
+      : SyncActionNode(name, config), gbplanner_(std::move(gbplanner)) {}
+  static BT::PortsList providedPorts() { return {}; }
+  BT::NodeStatus tick() override;
+private:
+  std::shared_ptr<Gbplanner> gbplanner_;
+};
+
+// The planner chooses the next bridge target; this node gives its path to PCI and only
+// acknowledges the target after the vehicle has reached its position.
+class InspectionWaypoint : public BT::StatefulActionNode
+{
+public:
+  InspectionWaypoint(const std::string& name, const BT::NodeConfig& config,
+                     std::shared_ptr<Gbplanner> gbplanner)
+      : StatefulActionNode(name, config), gbplanner_(std::move(gbplanner))
+  {
+    ros::NodeHandle nh;
+    target_client_ = nh.serviceClient<planner_msgs::GetInspectionTarget>(
+        "/inspection_target_compartments/get_target");
+    ros::NodeHandle private_nh("~");
+    private_nh.param("inspection_waypoint_reach_radius_m", reach_radius_m_, 0.15);
+    private_nh.param("inspection_waypoint_hold_s", reach_hold_s_, 1.0);
+    if (!std::isfinite(reach_radius_m_) || reach_radius_m_ <= 0.0) reach_radius_m_ = 0.15;
+    if (!std::isfinite(reach_hold_s_) || reach_hold_s_ < 0.0) reach_hold_s_ = 1.0;
+  }
+  static BT::PortsList providedPorts() { return {}; }
+  BT::NodeStatus onStart() override { return step(); }
+  BT::NodeStatus onRunning() override { return step(); }
+  void onHalted() override { reached_since_ = ros::Time(); }
+private:
+  BT::NodeStatus step();
+  std::shared_ptr<Gbplanner> gbplanner_;
+  ros::ServiceClient target_client_;
+  int compartment_index_ = -1;
+  int target_index_ = -1;
+  std::string revision_;
+  geometry_msgs::PoseStamped target_;
+  geometry_msgs::PoseStamped requested_target_;
+  bool target_resolved_ = false;
+  ros::WallTime next_path_retry_;
+  double reach_radius_m_ = 0.15;
+  double reach_hold_s_ = 1.0;
+  ros::Time reached_since_;
 };
 
 /*

@@ -5,8 +5,19 @@
   <BehaviorTree ID="waypoint_reach_bwt">
     <Fallback>
       <Sequence>
-        <SetNextCompartment/>
+        <BeginWaypointCompartment/>
         <BuildInspectionGraph/>
+        <Inverter>
+          <KeepRunningUntilFailure>
+            <InspectionWaypoint/>
+          </KeepRunningUntilFailure>
+        </Inverter>
+        <Fallback>
+          <Inverter>
+            <AllCompartmentsInspectedCheck/>
+          </Inverter>
+          <Idle/>
+        </Fallback>
         <SubTree ID="opening_passing"/>
       </Sequence>
       <Idle/>
@@ -14,15 +25,15 @@
   </BehaviorTree>
 
   <BehaviorTree ID="MainTree">
-    <Sequence>
-      <ReactiveFallback>
+    <ReactiveFallback>
+      <Sequence>
         <HomingCheck/>
-        <Sequence>
-          <SubTree ID="waypoint_reach_bwt"/>
-          <AlwaysFailure/>
-        </Sequence>
-      </ReactiveFallback>
-      <Homing/>
-    </Sequence>
+        <Homing/>
+      </Sequence>
+      <Sequence>
+        <SubTree ID="waypoint_reach_bwt"/>
+        <AlwaysFailure/>
+      </Sequence>
+    </ReactiveFallback>
   </BehaviorTree>
 </root>

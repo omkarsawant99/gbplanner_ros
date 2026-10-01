@@ -44,6 +44,7 @@ class gbplanner_panel : public rviz::Panel {
   void on_init_motion_click();
   void on_altitude_setpoint_click();
   void on_plan_to_waypoint_click();
+  void on_inspection_preflight_tick();
   void on_global_planner_click();
   void on_change_operation_mode_click();
  protected Q_SLOTS:
@@ -70,8 +71,21 @@ class gbplanner_panel : public rviz::Panel {
   nav_msgs::Odometry latest_odometry;
   std::mutex odometry_mutex;
   bool odometry_received = false;
+  ros::WallTime last_odometry_wall_time;
   double altitude_setpoint_z = 1.0;
   std::string altitude_frame_id = "world";
+  bool inspection_waypoint_sequence = false;
+  bool inspection_preflight_active = false;
+  bool inspection_planner_started = false;
+  double inspection_hover_s = 3.0;
+  double inspection_ascent_timeout_s = 30.0;
+  QTimer* inspection_preflight_timer = nullptr;
+  ros::WallTime inspection_started_at;
+  ros::WallTime inspection_stable_since;
+  trajectory_msgs::MultiDOFJointTrajectory inspection_altitude_command;
+
+  trajectory_msgs::MultiDOFJointTrajectory make_altitude_command(
+      const nav_msgs::Odometry& odometry) const;
 
   void odometry_callback(const nav_msgs::Odometry::ConstPtr& msg);
 
