@@ -166,6 +166,15 @@ rosservice call /planner_control_interface/std_srvs/automatic_planning
 ```
 
 The planner classifies each target between the detected entry and exit wall planes.
+CGN uses map-aligned compartment centers at x = 0, 3.04, 5.42, 7.83, 10.44 m,
+y = 0 m and z = 1.5 m. Relative compartment bounds are `[-2, -1, -1.5]`
+to `[2, 1, 1]` m; configured global bounds are `[-2, -2, 0.5]` to `[10, 2, 2]` m.
+Only X centers have been adjusted in this comparison: the old third center at
+x = 4 m caused the detected exit at x = 6.63 m to exceed the opening-selection
+distance limit. Global bounds still truncate the final compartment and will need
+review before full coverage there can be expected.
+`autoassess_set_global_bound` defaults to true, allowing the bridge to request
+structural-element bounds as before. Set it to false to keep configured bounds.
 The entry wall is the manhole used for the previous traversal; the exit wall is selected
 with the same opening-selection routine used for the next traversal. Missing exit
 walls make the tree wait. Wall normals are oriented along mission progress, so tilted
@@ -173,7 +182,14 @@ walls and reversed detector normals are handled. Within 5 cm of a wall, target v
 direction resolves which side should inspect it. Targets in other compartments are
 deferred and completed targets are remembered across traversals.
 Inspection arrival requires remaining within `inspection_waypoint_reach_radius_m`
-(default 0.15 m) for `inspection_waypoint_hold_s` (default 1.0 s of ROS time).
+(default 0.15 m) for `inspection_waypoint_hold_s` (default 3.0 s of ROS time in
+`gbplanner_cgn.launch`). After the hold, the planner selects the next pending target
+in the compartment. Once none remain, it traverses the next manhole and repeats
+the target check in the next compartment.
+With `waypoint_reach_bwt.xml`, PCI's path completion radius is half the inspection
+arrival radius (0.075 m by default). This lets the controller finish short trajectories
+before PCI requests another path; the previous 0.7 m tolerance could cause repeated
+commands to restart the trajectory before its final waypoint was applied.
 Leaving that radius resets the dwell. The planner first tries the requested position,
 then searches nearest-first on a 3D lattice for a reachable free pose in the same
 compartment. `inspection_waypoint_search_radius_m` defaults to 1.0 m and
@@ -181,8 +197,17 @@ compartment. `inspection_waypoint_search_radius_m` defaults to 1.0 m and
 `inspection_waypoint_search_attempts` (default 8) free candidates are checked for a
 route per planning attempt. This is a bounded sampled search, not an exact continuous
 nearest-point solution. Unknown and occupied robot boxes and blocked path segments
-are rejected. The adjusted goal retains the requested viewing orientation; the
+are rejected. Inspection target endpoints must additionally be free using the
+extended robot box (`size + size_extension`), even on relaxed planning retries,
+so they have the clearance required for the next departure. This checks endpoint
+clearance at planning time; it does not guarantee a subsequent manhole approach
+route or account for later map changes or tracking error.
+The adjusted goal retains the requested viewing orientation; the
 flight path uses level poses with yaw, as expected by the position controller.
+For the `InspectionWaypoint` action, yaw follows the shortest turn from the
+starting heading to the target heading, interpolated by distance along the route.
+Intermediate graph viewing angles are ignored. This is confined to target travel
+in the waypoint tree; ordinary inspection and manhole traversal retain their yaw behavior.
 The selected goal appears in orange as **Reachable Inspection Waypoint** on
 `/gbplanner/inspection_waypoint`; the bridge's original targets remain cyan. Arrival
 and the dwell use that selected goal, while completion refers to the original target

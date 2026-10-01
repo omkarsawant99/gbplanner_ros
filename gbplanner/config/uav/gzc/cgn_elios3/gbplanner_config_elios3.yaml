@@ -569,7 +569,10 @@ PlanningParams:
   exploration_only: false
   # Setting centers and compartment dimensions
   # compartment_centers: [0.0, 0.0, 0.0] # 1.1
-  compartment_centers: [0.0, 0.0, 1.5, 2.0, 0.0, 1.5,4.0, 0.0, 1.5,6.0, 0.0, 1.5,8.0, 0.0, 1.5] # 1.1
+  # X centers follow reference-map walls at 1.87, 4.22, 6.63 and 9.04 m.
+  # Keep the existing Y/Z centers and dimensions for this isolated comparison.
+  compartment_centers: [0.0, 0.0, 1.5, 3.04, 0.0, 1.5, 5.42, 0.0, 1.5,
+                        7.83, 0.0, 1.5, 10.44, 0.0, 1.5]
   compartment_dimensions:
     type:           kCuboid
     # min_val:        [-2.0, -3.0, -1.1]

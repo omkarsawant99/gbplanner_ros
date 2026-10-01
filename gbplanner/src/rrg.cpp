@@ -4679,13 +4679,20 @@ bool Rrg::planInspectionWaypoint(const geometry_msgs::PoseStamped& requested,
       if ((p - plane.first).dot(plane.second) < -1e-6) return false;
     return true;
   };
-  auto free_pose = [&](const Eigen::Vector3d& p) {
+  // An inspection endpoint must also be a valid departure point when PCI
+  // returns to kExtendedBound. Keep this independent of the current retry mode.
+  const Eigen::Vector3d departure_box_size =
+      robot_params_.size + robot_params_.size_extension;
+  auto free_pose_with_size = [&](const Eigen::Vector3d& p, const Eigen::Vector3d& box_size) {
     if (!p.allFinite() || !in_compartment(p)) return false;
     const Eigen::Vector3d center = p + robot_params_.center_offset;
     if (planning_params_.geofence_checking_enable &&
-        geofence_manager_->getBoxStatus(center.head<2>(), robot_box_size_.head<2>()) ==
+        geofence_manager_->getBoxStatus(center.head<2>(), box_size.head<2>()) ==
         GeofenceManager::CoordinateStatus::kViolated) return false;
-    return map_manager_->getBoxStatus(center, robot_box_size_, true) == VoxelStatus::kFree;
+    return map_manager_->getBoxStatus(center, box_size, true) == VoxelStatus::kFree;
+  };
+  auto free_pose = [&](const Eigen::Vector3d& p) {
+    return free_pose_with_size(p, robot_box_size_);
   };
   auto free_segment = [&](const Eigen::Vector3d& a, const Eigen::Vector3d& b) {
     if (!free_pose(a) || !free_pose(b)) return false;
@@ -4723,7 +4730,7 @@ bool Rrg::planInspectionWaypoint(const geometry_msgs::PoseStamped& requested,
     candidate.pose.position.y += offset[1];
     candidate.pose.position.z += offset[2];
     const Eigen::Vector3d p = position(candidate.pose);
-    if (!free_pose(p)) continue;
+    if (!free_pose(p) || !free_pose_with_size(p, departure_box_size)) continue;
     if (++attempts > max_attempts) break;
     std::vector<geometry_msgs::Pose> route;
     bool connected = free_segment(position(current), p);

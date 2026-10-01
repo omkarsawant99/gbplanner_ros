@@ -794,6 +794,26 @@ bool Gbplanner::planWaypointTarget(const geometry_msgs::PoseStamped& requested,
     }
     flight_path.push_back(pose);
   }
+  // Only the InspectionWaypoint BT action uses this path. Graph vertices carry
+  // inspection viewing angles; use one shortest yaw turn over travel distance
+  // instead, preserving the requested target heading without changing PCI.
+  std::vector<double> distance(flight_path.size(), 0.0);
+  for (size_t i = 1; i < flight_path.size(); ++i) {
+    const auto& a = flight_path[i - 1].position;
+    const auto& b = flight_path[i].position;
+    distance[i] = distance[i - 1] +
+        Eigen::Vector3d(b.x - a.x, b.y - a.y, b.z - a.z).norm();
+  }
+  const double start_yaw = current_state_[3];
+  const double goal_yaw = tf::getYaw(adjusted.pose.orientation);
+  const double yaw_delta = std::atan2(std::sin(goal_yaw - start_yaw),
+                                    std::cos(goal_yaw - start_yaw));
+  for (size_t i = 0; i < flight_path.size(); ++i) {
+    // A zero-length route requests the target heading at the current position.
+    const double fraction = distance.back() > 1e-6 ? distance[i] / distance.back() : 1.0;
+    flight_path[i].orientation =
+        tf::createQuaternionMsgFromYaw(start_yaw + fraction * yaw_delta);
+  }
   out_srv_res_.path = std::move(flight_path);
   return true;
 }
@@ -959,7 +979,10 @@ bool Gbplanner::prepareWaypointGraph()
   if (!inspection_path_found && graph_ready) {
     ROS_WARN("No inspection flight path was selected, but the global graph is usable");
   }
-  return graph_ready;
+  // Frontier/history filtering may leave the global graph with only its root
+  // even after a valid inspection path was built. Waypoint planning can also
+  // connect directly or run a local search, with every segment collision checked.
+  return inspection_path_found || graph_ready;
 }
 
 bool Gbplanner::getInspectionPath(planner_msgs::planner_srv::Request& req,
@@ -1146,8 +1169,13 @@ bool Gbplanner::getCompartmentTransitionPath(planner_msgs::planner_srv::Request&
 bool Gbplanner::homingRequired()
 {
   rrg_->setBoundMode(static_cast<BoundModeType>(in_srv_req_.bound_mode));
-  out_srv_res_.status = planner_msgs::planner_srv::Response::kHoming;
-  return rrg_->homingRequired(out_srv_res_.path);
+  const bool required = rrg_->homingRequired(out_srv_res_.path);
+  out_srv_res_.status = required ? planner_msgs::planner_srv::Response::kHoming
+                               : planner_msgs::planner_srv::Response::kAutoCustomPath;
+  // A false condition must not return a homing path/status while a later
+  // stateful tree action waits; PCI would stop automatic planning on that status.
+  if (!required) out_srv_res_.path.clear();
+  return required;
 }
 
 bool Gbplanner::getHomingPath()

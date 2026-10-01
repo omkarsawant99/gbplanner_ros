@@ -15,12 +15,14 @@
 	<arg name="simulation_world_file" default="$(find rotors_gazebo)/worlds/empty.world"/>
 	<arg name="rviz_en" default="true" />
 	<arg name="autoassess_bridge_en" default="true" />
+	<!-- Retain the bridge global-bound behavior used before compartment tuning. -->
+	<arg name="autoassess_set_global_bound" default="true" />
 	<arg name="inspection_target_waypoints_en" default="false" />
 	<arg name="inspection_target_auto_start" default="false" />
 	<arg name="inspection_start_altitude_m" default="1.0" />
 	<arg name="inspection_hover_s" default="3.0" />
 	<arg name="inspection_waypoint_reach_radius_m" default="0.15" />
-	<arg name="inspection_waypoint_hold_s" default="1.0" />
+	<arg name="inspection_waypoint_hold_s" default="3.0" />
 	<arg name="inspection_waypoint_search_radius_m" default="1.0" />
 	<arg name="inspection_waypoint_search_resolution_m" default="0.1" />
 	<arg name="inspection_waypoint_search_attempts" default="8" />
@@ -39,10 +41,13 @@
 	<arg name="planner_behaviour_tree" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/waypoint_reach_bwt.xml"/>
 
 	<arg name="odometry_topic" default="/rmf_obelix/ground_truth/odometry_throttled"/>
+	<arg name="autoassess_plan_name" default="Test plan for gbplannersim"/>
 
 	<!-- AutoAssess plan and reference map -->
 	<include if="$(arg autoassess_bridge_en)" file="$(find autoassess_bridge)/launch/autoassess_bridge.launch">
 		<arg name="odometry_topic" value="$(arg odometry_topic)"/>
+		<arg name="plan_name" value="$(arg autoassess_plan_name)"/>
+		<arg name="set_global_bound" value="$(arg autoassess_set_global_bound)"/>
 		<arg name="inspection_target_waypoints_en" value="$(arg inspection_target_waypoints_en)"/>
 		<arg name="inspection_target_auto_start" value="$(arg inspection_target_auto_start)"/>
 	</include>
@@ -84,10 +89,15 @@
 	<node pkg="pci_general" type="pci_general_ros_node" name="pci_general_ros_node" output="screen">
 		<remap from="command/trajectory" to="/rmf_obelix/command/trajectory" />
 		<remap from="planner_server" to="gbplanner_ros" />
-		<remap from="planner_homing_server" to="gbplanner/homing" />
+			<remap from="planner_homing_server" to="gbplanner/homing" />
 		<remap from="odometry" to="$(arg odometry_topic)"/>     
-		<rosparam command="load" file="$(arg pci_file)" />
-		<param name="world_frame_id" value="$(arg world_frame)"/>
+			<rosparam command="load" file="$(arg pci_file)" />
+			<!-- Finish inside the inspection arrival radius before allowing another
+			     plan; otherwise short trajectories get replaced before their last point. -->
+			<param if="$(eval arg('planner_behaviour_tree').endswith('waypoint_reach_bwt.xml'))"
+			       name="path_end_dist_thr"
+			       value="$(eval 0.5 * float(arg('inspection_waypoint_reach_radius_m')))"/>
+			<param name="world_frame_id" value="$(arg world_frame)"/>
 	</node>
 
 	<!-- Project the unorganized reference map into the detector's spherical image. -->
