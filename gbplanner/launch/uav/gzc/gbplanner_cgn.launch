@@ -1,0 +1,164 @@
+<?xml version="1.0"?>
+<launch>
+	<!-- All settings -->
+	<arg name="robot_name" default="rmf_obelix"/>
+	<arg name="config_folder" default="uav/gzc/bwt_inspection"/>
+	<arg name="world_frame" default="world"/>
+	<arg name="pointcloud_topic" default="/ballast_tank/pointcloud"/>
+	<arg name="organized_cloud_topic" default="/manhole/organized_cloud"/>
+	<arg name="organized_range_image_topic" default="/manhole/range_image"/>
+	<arg name="organizer_projection_frame" default="$(arg robot_name)/base_link"/>
+	<arg name="gazebo_gui_en" default="false"/>
+	<!-- Use an empty physics world for CGN reference-map simulation. The legacy
+	     BWT collision mesh does not align with the AutoAssess map and can block
+	     an otherwise valid manhole traversal. -->
+	<arg name="simulation_world_file" default="$(find rotors_gazebo)/worlds/empty.world"/>
+	<arg name="rviz_en" default="true" />
+	<arg name="autoassess_bridge_en" default="true" />
+	<!-- Retain the bridge global-bound behavior used before compartment tuning. -->
+	<arg name="autoassess_set_global_bound" default="true" />
+	<arg name="inspection_target_waypoints_en" default="false" />
+	<arg name="inspection_target_auto_start" default="false" />
+	<arg name="inspection_start_altitude_m" default="1.0" />
+	<arg name="inspection_hover_s" default="3.0" />
+	<arg name="inspection_waypoint_reach_radius_m" default="0.15" />
+	<arg name="inspection_waypoint_hold_s" default="3.0" />
+	<!-- Measurement handshake applies only to InspectionWaypoint, not inspection/manhole paths. -->
+	<arg name="ndt_measurement_enabled" default="true" />
+	<arg name="ndt_mock_en" default="true" />
+	<arg name="ndt_mock_duration_s" default="10.0" />
+	<arg name="ndt_start_service" default="/ndt/start_measurement" />
+	<arg name="ndt_complete_service" default="/ndt/measurement_complete" />
+	<arg name="inspection_waypoint_search_radius_m" default="1.0" />
+	<arg name="inspection_waypoint_search_resolution_m" default="0.1" />
+	<arg name="inspection_waypoint_search_attempts" default="8" />
+	<arg name="launch_prefix" default=""/> <!-- gdb -ex run //args -->
+
+	<arg name="use_sim_time" default="true"/>
+	<param name="use_sim_time" value="$(arg use_sim_time)"/>
+
+
+	<!-- Config files -->
+	<arg name="gbplanner_config_file" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/gbplanner_config_elios3.yaml"/>
+	<arg name="pci_file" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/planner_control_interface_config_elios3.yaml"/>
+	<arg name="voxblox_config_file" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/voxblox_config_elios3.yaml"/>
+	<arg name="map_config_file" default="$(arg voxblox_config_file)"/>
+	<arg name="opening_config_file" default="$(find manhole_detector)/config/manhole_detector.yaml"/>
+	<arg name="planner_behaviour_tree" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/waypoint_reach_bwt.xml"/>
+	<!-- <arg name="planner_behaviour_tree" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/main_tree_integration.xml"/> -->
+
+	<arg name="odometry_topic" default="/rmf_obelix/ground_truth/odometry_throttled"/>
+	<arg name="autoassess_plan_name" default="Test plan for gbplannersim"/>
+
+	<!-- AutoAssess plan and reference map -->
+	<include if="$(arg autoassess_bridge_en)" file="$(find autoassess_bridge)/launch/autoassess_bridge.launch">
+		<arg name="odometry_topic" value="$(arg odometry_topic)"/>
+		<arg name="plan_name" value="$(arg autoassess_plan_name)"/>
+		<arg name="inspection_target_waypoints_en" value="$(arg inspection_target_waypoints_en)"/>
+		<arg name="inspection_target_auto_start" value="$(arg inspection_target_auto_start)"/>
+	</include>
+
+	<!-- Override after the bridge loads its YAML; upstream has no launch argument for this. -->
+	<param if="$(arg autoassess_bridge_en)" name="/autoassess_bridge/set_global_bound"
+	       type="bool" value="$(arg autoassess_set_global_bound)"/>
+	<node if="$(arg autoassess_bridge_en)" pkg="gbplanner"
+	      type="inspection_target_compartments.py" name="inspection_target_compartments" output="screen">
+		<param name="world_frame" value="$(arg world_frame)"/>
+	</node>
+
+	<!-- Simulation -->
+	<include file="$(find arl_gazebo_sim)/gzc/uav_sim/launch/uav_gzc_bwt_inspection.launch">
+		<arg name="robot_name" value="$(arg robot_name)"/>
+		<arg name="launch_prefix" value="$(arg launch_prefix)"/>
+		<arg name="gazebo_gui_en" value="$(arg gazebo_gui_en)"/>
+		<arg name="world_file" value="$(arg simulation_world_file)"/>
+	</include>
+
+	<!-- Graph based planning -->
+	<node pkg="gbplanner" type="gbplanner_node" name="gbplanner_node" output="screen" launch-prefix="$(arg launch_prefix)">
+		<remap from="odometry" to="$(arg odometry_topic)" />
+		<remap from="/pointcloud" to="$(arg pointcloud_topic)" />
+		<remap from="opening_detections" to="stable_detections"/>
+		<remap from="query_point" to="/rmf_obelix/tsdf_query_pt"/>
+		<rosparam command="load" file="$(arg gbplanner_config_file)" />
+		<rosparam command="load" file="$(arg map_config_file)" />
+		<param name="world_frame" value="$(arg world_frame)"/>
+		<param name="PlanningParams/global_frame_id" value="$(arg world_frame)"/>
+		<param name="behavior_tree_path" value="$(arg planner_behaviour_tree)"/>
+		<param name="opening_detection_wait_s" value="15.0"/>
+		<param name="opening_forward_only" value="true"/>
+		<param name="inspection_waypoint_reach_radius_m" value="$(arg inspection_waypoint_reach_radius_m)"/>
+		<param name="inspection_waypoint_hold_s" value="$(arg inspection_waypoint_hold_s)"/>
+		<param name="ndt_measurement_enabled" value="$(arg ndt_measurement_enabled)"/>
+		<param name="ndt_start_service" value="$(arg ndt_start_service)"/>
+		<param name="ndt_complete_service" value="$(arg ndt_complete_service)"/>
+		<param name="inspection_waypoint_search_radius_m" value="$(arg inspection_waypoint_search_radius_m)"/>
+		<param name="inspection_waypoint_search_resolution_m" value="$(arg inspection_waypoint_search_resolution_m)"/>
+		<param name="inspection_waypoint_search_attempts" value="$(arg inspection_waypoint_search_attempts)"/>
+	</node>
+
+	<node if="$(eval arg('ndt_measurement_enabled') and arg('ndt_mock_en') and arg('planner_behaviour_tree').endswith('waypoint_reach_bwt.xml'))"
+	      pkg="gbplanner" type="mock_ndt_measurement.py" name="mock_ndt_measurement" output="screen">
+		<param name="duration_s" value="$(arg ndt_mock_duration_s)"/>
+		<param name="start_service" value="$(arg ndt_start_service)"/>
+		<param name="complete_service" value="$(arg ndt_complete_service)"/>
+	</node>
+
+	<!-- Planner and Control Interface -->
+	<node pkg="pci_general" type="pci_general_ros_node" name="pci_general_ros_node" output="screen">
+		<remap from="command/trajectory" to="/rmf_obelix/command/trajectory" />
+		<remap from="planner_server" to="gbplanner_ros" />
+			<remap from="planner_homing_server" to="gbplanner/homing" />
+		<remap from="odometry" to="$(arg odometry_topic)"/>     
+			<rosparam command="load" file="$(arg pci_file)" />
+			<!-- Finish inside the inspection arrival radius before allowing another
+			     plan; otherwise short trajectories get replaced before their last point. -->
+			<param if="$(eval arg('planner_behaviour_tree').endswith('waypoint_reach_bwt.xml'))"
+			       name="path_end_dist_thr"
+			       value="$(eval 0.5 * float(arg('inspection_waypoint_reach_radius_m')))"/>
+			<param name="world_frame_id" value="$(arg world_frame)"/>
+	</node>
+
+	<!-- Project the unorganized reference map into the detector's spherical image. -->
+	<include file="$(find manhole_detector)/launch/spherical_cloud_organizer.launch">
+		<arg name="input_cloud" value="$(arg pointcloud_topic)"/>
+		<arg name="organized_cloud" value="$(arg organized_cloud_topic)"/>
+		<arg name="range_image" value="$(arg organized_range_image_topic)"/>
+		<arg name="rows" value="128"/>
+		<arg name="columns" value="256"/>
+		<arg name="min_elevation_deg" value="-50.0"/>
+		<arg name="max_elevation_deg" value="90.0"/>
+		<arg name="min_range" value="0.3"/>
+		<arg name="max_range" value="7.0"/>
+		<arg name="fill_iterations" value="1"/>
+		<arg name="projection_frame" value="$(arg organizer_projection_frame)"/>
+		<arg name="restamp_output" value="false"/>
+		<arg name="use_latest_transform" value="false"/>
+	</include>
+
+	<node pkg="manhole_detector" type="manhole_detector_node" name="manhole_detector_node" output="screen">
+		<remap from="pcl_in" to="$(arg organized_cloud_topic)" />
+		<remap from="depth_img_in" to="$(arg organized_range_image_topic)" />
+		<remap from="odometry" to="$(arg odometry_topic)" />
+		<rosparam command="load" file="$(arg opening_config_file)" />
+		<param name="reference_frame" value="$(arg world_frame)"/>
+		<!-- Must match the organizer's row count: detector indexes offsets by row. -->
+		<param name="num_laser_beams" value="128"/>
+		<!-- The reference map arrives at 1 Hz, so require four matching frames. -->
+		<param name="min_detection_to_be_permenant" value="4"/>
+	</node>
+
+	
+	<!-- Rviz -->
+	<node pkg="rviz" type="rviz" name="gbplanner_ui" output="screen" args="-d $(find gbplanner)/config/$(arg config_folder)/ui.rviz">
+		<param name="waypoint_service" value="/planner_control_interface/std_srvs/automatic_planning"/>
+		<param name="waypoint_button_label" value="NDT waypoint navigation"/>
+		<param name="inspection_waypoint_sequence" value="true"/>
+		<param name="inspection_hover_s" value="$(arg inspection_hover_s)"/>
+		<param name="altitude_command_topic" value="/$(arg robot_name)/command/trajectory"/>
+		<param name="altitude_odometry_topic" value="$(arg odometry_topic)"/>
+		<param name="altitude_setpoint_z" value="$(arg inspection_start_altitude_m)"/>
+		<param name="altitude_frame_id" value="$(arg world_frame)"/>
+	</node>
+
+</launch>

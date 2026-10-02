@@ -1,0 +1,51 @@
+run_mode: kReal
+trigger_mode: kManual
+world_frame_id: world
+init_motion_enable: false
+planner_trigger_lead_time: 0.01
+smooth_heading_enable: false
+smooth_homing_enable: false
+# For flight:
+# path_end_dist_thr: 1.0 # 1.5 # 0.5
+# path_end_yaw_thr: 2.0
+# path_end_dist_scale: 1.0 #0.75
+# path_progression_dist_thr: 10.8 # 200.8 # 0.9
+# path_progression_dist_thr_min: 10.8 # 200.8 # 0.6
+# path_progression_yaw_thr: 3.14
+# path_progression_yaw_thr_min: 3.14
+# path_progression_pitch_thr: 3.14
+path_end_dist_thr: 0.7
+path_end_yaw_thr: 0.4
+path_progression_dist_thr: 1.0
+path_progression_dist_thr_min: 1.0
+path_progression_pitch_thr: 0.4
+path_progression_yaw_thr: 0.4
+path_progression_yaw_thr_min: 0.4
+z_offset_a: 0.0
+z_offset_b: 0.0
+z_off_t_start: 0
+max_mission_time: 0
+pub_singple_wp: false
+interpolate_traj: true
+# ---------------------------
+# ONLY FOR HANDHELD:
+# path_end_dist_thr: 0.9
+# path_end_yaw_thr: 2.0
+# path_progression_dist_thr: 0.9
+# path_progression_yaw_thr: 2.0
+# ---------------------------
+trajectory_lead_time: 0.0 # 1.0 # 3.0
+# Not used due to manual take off
+init_motion:
+  z_takeoff: 1.2
+  z_drop: 0.5
+  x_forward: -0.75
+
+# Group related parameters to be shared between nodes.
+RobotDynamics:
+  v_max: 1.0 # Final test: 1.5
+  v_init_max: 1.0
+  v_homing_max: 1.0 # Final test: 1.5
+  yaw_rate_max: 0.7 # 0.15 # 0.25
+  dt: 0.5 # Try: 0.5
+  a_max: 0.3 # Final test: 0.9

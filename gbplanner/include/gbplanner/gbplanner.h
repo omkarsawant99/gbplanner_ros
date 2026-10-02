@@ -98,6 +98,7 @@ class Gbplanner {
   Rrg::GlobalPlannerStatus getGlobalExplorationPath();
   bool checkGlobalExplorationStatus();
   bool getInspectionPath();
+  bool prepareWaypointGraph();
   
   bool getHomingPath();
   bool homingRequired();
@@ -108,6 +109,15 @@ class Gbplanner {
 
   void getOpeningTraversalPath(OpeningTraversalMode mode, OpeningTraversalStatus &status);
   bool transitionCompartment();
+  bool beginWaypointCompartment();
+  bool waypointCompartmentWalls(geometry_msgs::Pose& entry, bool& has_entry,
+                               geometry_msgs::Pose& exit, bool& has_exit,
+                               geometry_msgs::Vector3& forward);
+  int currentWaypointCompartment() const { return compartment_counter_ - 1; }
+  bool hasWaypointOdometry() const { return waypoint_odometry_received_; }
+  bool waypointTargetReached(const geometry_msgs::PoseStamped& target, double radius) const;
+  bool planWaypointTarget(const geometry_msgs::PoseStamped& requested,
+                          geometry_msgs::PoseStamped& adjusted);
   bool allCompartmentsInspected();
 	bool getCompartmentTransitionPath();
   
@@ -155,6 +165,9 @@ class Gbplanner {
   std::vector<geometry_msgs::Pose> active_global_path_;
 
   StateVec current_state_;
+  bool waypoint_odometry_received_ = false;
+  geometry_msgs::Pose waypoint_entry_wall_;
+  bool waypoint_has_entry_wall_ = false;
 
   PlannerStatus planner_status_;
 

@@ -260,9 +260,21 @@ class Rrg {
   std::vector<geometry_msgs::Pose> getGlobalPath(
       geometry_msgs::PoseStamped& waypoint);
 
+  bool planInspectionWaypoint(const geometry_msgs::PoseStamped& requested,
+      const geometry_msgs::Pose* entry, const geometry_msgs::Pose* exit,
+      const Eigen::Vector3d& forward, geometry_msgs::PoseStamped& adjusted,
+      std::vector<geometry_msgs::Pose>& path);
+
+  // Commit the inspection planner's local graph before another BT action runs.
+  bool commitInspectionGraph();
+
   std::vector<geometry_msgs::Pose> getOpeningTraversalPath();
   std::vector<geometry_msgs::Pose> getOpeningTraversalPath(OpeningTraversalMode mode, OpeningTraversalStatus &status);
   void setNextCompartmentCenter(Eigen::Vector3d &center);
+  std::shared_ptr<Opening> selectNextOpening();
+  bool getWaypointExitWall(geometry_msgs::Pose& wall);
+  bool getSelectedOpeningPose(geometry_msgs::Pose& wall) const;
+  void resetWaypointBoundary() { waypoint_boundary_id_ = -1; }
   void setNextCompartmentIndex(int ind) {next_compartment_index_ = ind;}
 
   // Set current position as homing.
@@ -426,6 +438,7 @@ class Rrg {
   ros::ServiceServer approve_passing_srv_;
   ros::ServiceServer reset_map_srv_;
   ros::ServiceServer query_srv_;
+  ros::Publisher inspection_waypoint_pub_;
   ros::ServiceServer remove_geofence_srv_;
 
   bool resetTimerCallback(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
@@ -679,6 +692,7 @@ class Rrg {
   // std::shared_ptr<OpeningDetector> opening_detector_;
   OpeningTraversalMode opening_traversal_mode_;
   int opening_under_execution_ = -1;
+  int waypoint_boundary_id_ = -1;
   OpeningApproval opening_passing_approved_ = OpeningApproval::kWaiting;
   Eigen::Vector3d next_compartment_;
   int next_compartment_index_ = -1;

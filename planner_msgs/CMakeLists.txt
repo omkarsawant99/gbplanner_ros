@@ -34,6 +34,7 @@ add_service_files(
   planner_dynamic_global_bound.srv
   planner_set_planning_mode.srv
   planner_opening_approval.srv
+  GetInspectionTarget.srv
 )
 
 add_message_files(

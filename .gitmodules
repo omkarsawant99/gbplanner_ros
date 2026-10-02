@@ -1,0 +1,3 @@
+[submodule "autoassess_bridge"]
+	path = autoassess_bridge
+	url = git@github.com:AUTOASSESS/autoassess-cgn-bridge.git

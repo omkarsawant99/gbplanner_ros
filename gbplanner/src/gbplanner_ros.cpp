@@ -54,6 +54,7 @@ void GbplannerRos::registerTree()
   factory_.registerNodeType<LocalExpExhaustedCheck>("LocalExpExhaustedCheck", gbplanner_);
   factory_.registerNodeType<GlobalExpExhaustedCheck>("GlobalExpExhaustedCheck", gbplanner_);
   factory_.registerNodeType<Inspection>("Inspection", gbplanner_);
+  factory_.registerNodeType<BuildInspectionGraph>("BuildInspectionGraph", gbplanner_);
   factory_.registerNodeType<CompartmentTransition>("CompartmentTransition", gbplanner_);
   factory_.registerNodeType<Homing>("Homing", gbplanner_);
   factory_.registerNodeType<HomingCheck>("HomingCheck", gbplanner_);
@@ -64,6 +65,8 @@ void GbplannerRos::registerTree()
   factory_.registerNodeType<Idle>("Idle", gbplanner_);
   factory_.registerNodeType<OPENINGP1FailCheck>("OPENINGP1FailCheck", gbplanner_);
   factory_.registerNodeType<SetNextCompartment>("SetNextCompartment", gbplanner_);
+  factory_.registerNodeType<BeginWaypointCompartment>("BeginWaypointCompartment", gbplanner_);
+  factory_.registerNodeType<InspectionWaypoint>("InspectionWaypoint", gbplanner_);
   factory_.registerNodeType<AllCompartmentsInspectedCheck>("AllCompartmentsInspectedCheck", gbplanner_);
   factory_.registerNodeType<LocalNavigation>("LocalNavigation", gbplanner_);
   factory_.registerNodeType<LocalNavigationExhaustedCheck>("LocalNavigationExhaustedCheck", gbplanner_);

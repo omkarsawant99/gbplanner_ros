@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
+  <include path="./inspection.xml" />
+  <include path="./opening_passing.xml" />
+  <BehaviorTree ID="insp_opening">
+    <Sequence>
+      <SetNextCompartment/>
+      <SubTree ID="inspection"/>
+      <Fallback>
+        <Inverter>
+          <AllCompartmentsInspectedCheck/>
+        </Inverter>
+        <Idle/>
+      </Fallback>
+      <SubTree ID="opening_passing"/>
+    </Sequence>
+  </BehaviorTree>
+</root>

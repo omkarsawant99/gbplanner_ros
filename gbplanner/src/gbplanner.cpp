@@ -688,6 +688,11 @@ Rrg::LocalPlannerStatus Gbplanner::getExplorationPath()
 
 bool Gbplanner::transitionCompartment()
 {
+  if (compartment_counter_ < 0 ||
+      static_cast<size_t>(compartment_counter_ + 1) >= planning_params_.compartment_centers.size()) {
+    ROS_INFO("No next compartment available for opening traversal");
+    return false;
+  }
   rrg_->setNextCompartmentCenter(planning_params_.compartment_centers[compartment_counter_+1]);
   rrg_->setNextCompartmentIndex(compartment_counter_+1);
   BoundedSpaceParams translated_bound = planning_params_.compartment_dimensions;
@@ -699,6 +704,117 @@ bool Gbplanner::transitionCompartment()
   ROS_WARN_COND(global_verbosity >= Verbosity::DEBUG, "Compartment counter: %d", compartment_counter_);
   rrg_->setExplorationAndInspectionBounds(translated_bound, translated_bound);
   ++compartment_counter_;
+  return true;
+}
+
+bool Gbplanner::beginWaypointCompartment()
+{
+  if (compartment_counter_ < 0 ||
+      static_cast<size_t>(compartment_counter_) >= planning_params_.compartment_centers.size()) {
+    ROS_INFO("All waypoint compartments visited");
+    return false;
+  }
+  waypoint_has_entry_wall_ = compartment_counter_ > 0;
+  if (waypoint_has_entry_wall_ && !rrg_->getSelectedOpeningPose(waypoint_entry_wall_)) {
+    ROS_WARN("Cannot identify the wall used to enter this compartment");
+    return false;
+  }
+  rrg_->resetWaypointBoundary();
+  const auto& center = planning_params_.compartment_centers[compartment_counter_];
+  BoundedSpaceParams bound = planning_params_.compartment_dimensions;
+  Eigen::Vector3d minimum = bound.min_val + center;
+  Eigen::Vector3d maximum = bound.max_val + center;
+  bound.setBound(minimum, maximum);
+  rrg_->setExplorationAndInspectionBounds(bound, bound);
+  if (static_cast<size_t>(compartment_counter_ + 1) < planning_params_.compartment_centers.size()) {
+    rrg_->setNextCompartmentCenter(planning_params_.compartment_centers[compartment_counter_ + 1]);
+    rrg_->setNextCompartmentIndex(compartment_counter_ + 1);
+  }
+  ROS_INFO("Waypoint inspection entering compartment %d", compartment_counter_);
+  ++compartment_counter_;
+  return true;
+}
+
+bool Gbplanner::waypointCompartmentWalls(geometry_msgs::Pose& entry, bool& has_entry,
+                                        geometry_msgs::Pose& exit, bool& has_exit,
+                                        geometry_msgs::Vector3& forward)
+{
+  const int index = currentWaypointCompartment();
+  const auto& centers = planning_params_.compartment_centers;
+  if (index < 0 || static_cast<size_t>(index) >= centers.size()) return false;
+  has_entry = waypoint_has_entry_wall_;
+  entry = waypoint_entry_wall_;
+  has_exit = static_cast<size_t>(index + 1) < centers.size();
+  Eigen::Vector3d direction = Eigen::Vector3d::UnitX();
+  if (has_exit) direction = centers[index + 1] - centers[index];
+  else if (index > 0) direction = centers[index] - centers[index - 1];
+  forward.x = direction.x();
+  forward.y = direction.y();
+  forward.z = direction.z();
+  if (has_exit && !rrg_->getWaypointExitWall(exit)) {
+    ROS_WARN_THROTTLE(5.0, "Waiting for a detected exit wall before classifying inspection targets");
+    return false;
+  }
+  return true;
+}
+
+bool Gbplanner::waypointTargetReached(const geometry_msgs::PoseStamped& target, double radius) const
+{
+  if (!waypoint_odometry_received_) return false;
+  const auto& p = target.pose.position;
+  return (Eigen::Vector3d(current_state_[0], current_state_[1], current_state_[2]) -
+          Eigen::Vector3d(p.x, p.y, p.z)).norm() <= radius;
+}
+
+bool Gbplanner::planWaypointTarget(const geometry_msgs::PoseStamped& requested,
+                                  geometry_msgs::PoseStamped& adjusted)
+{
+  geometry_msgs::Pose entry, exit;
+  geometry_msgs::Vector3 forward;
+  bool has_entry, has_exit;
+  out_srv_res_.path.clear();
+  out_srv_res_.status = planner_msgs::planner_srv::Response::kAutoCustomPath;
+  if (!waypointCompartmentWalls(entry, has_entry, exit, has_exit, forward)) return false;
+  if (!rrg_->planInspectionWaypoint(requested, has_entry ? &entry : nullptr,
+      has_exit ? &exit : nullptr, Eigen::Vector3d(forward.x, forward.y, forward.z),
+      adjusted, out_srv_res_.path)) return false;
+  // Inspection viewing pitch is not an airframe pitch command. PCI flies a
+  // level vehicle and uses yaw for these position waypoints.
+  std::vector<geometry_msgs::Pose> flight_path;
+  for (auto pose : out_srv_res_.path) {
+    pose.orientation = tf::createQuaternionMsgFromYaw(tf::getYaw(pose.orientation));
+    if (!flight_path.empty()) {
+      const auto& previous = flight_path.back().position;
+      const auto& next = pose.position;
+      if ((Eigen::Vector3d(previous.x, previous.y, previous.z) -
+           Eigen::Vector3d(next.x, next.y, next.z)).squaredNorm() < 1e-12) {
+        flight_path.back() = pose;
+        continue;
+      }
+    }
+    flight_path.push_back(pose);
+  }
+  // Only the InspectionWaypoint BT action uses this path. Graph vertices carry
+  // inspection viewing angles; use one shortest yaw turn over travel distance
+  // instead, preserving the requested target heading without changing PCI.
+  std::vector<double> distance(flight_path.size(), 0.0);
+  for (size_t i = 1; i < flight_path.size(); ++i) {
+    const auto& a = flight_path[i - 1].position;
+    const auto& b = flight_path[i].position;
+    distance[i] = distance[i - 1] +
+        Eigen::Vector3d(b.x - a.x, b.y - a.y, b.z - a.z).norm();
+  }
+  const double start_yaw = current_state_[3];
+  const double goal_yaw = tf::getYaw(adjusted.pose.orientation);
+  const double yaw_delta = std::atan2(std::sin(goal_yaw - start_yaw),
+                                    std::cos(goal_yaw - start_yaw));
+  for (size_t i = 0; i < flight_path.size(); ++i) {
+    // A zero-length route requests the target heading at the current position.
+    const double fraction = distance.back() > 1e-6 ? distance[i] / distance.back() : 1.0;
+    flight_path[i].orientation =
+        tf::createQuaternionMsgFromYaw(start_yaw + fraction * yaw_delta);
+  }
+  out_srv_res_.path = std::move(flight_path);
   return true;
 }
 
@@ -848,6 +964,25 @@ bool Gbplanner::getInspectionPath()
     return true;
   else 
     return false;
+}
+
+bool Gbplanner::prepareWaypointGraph()
+{
+  const bool inspection_path_found = getInspectionPath();
+  const size_t inspection_path_size = out_srv_res_.path.size();
+  // The inspection plan is used only to generate the graph in this workflow.
+  out_srv_res_.path.clear();
+  out_srv_res_.status = planner_msgs::planner_srv::Response::kAutoCustomPath;
+  const bool graph_ready = rrg_->commitInspectionGraph();
+  ROS_INFO("Inspection graph preparation: path poses=%zu, graph ready=%s",
+           inspection_path_size, graph_ready ? "true" : "false");
+  if (!inspection_path_found && graph_ready) {
+    ROS_WARN("No inspection flight path was selected, but the global graph is usable");
+  }
+  // Frontier/history filtering may leave the global graph with only its root
+  // even after a valid inspection path was built. Waypoint planning can also
+  // connect directly or run a local search, with every segment collision checked.
+  return inspection_path_found || graph_ready;
 }
 
 bool Gbplanner::getInspectionPath(planner_msgs::planner_srv::Request& req,
@@ -1034,8 +1169,13 @@ bool Gbplanner::getCompartmentTransitionPath(planner_msgs::planner_srv::Request&
 bool Gbplanner::homingRequired()
 {
   rrg_->setBoundMode(static_cast<BoundModeType>(in_srv_req_.bound_mode));
-  out_srv_res_.status = planner_msgs::planner_srv::Response::kHoming;
-  return rrg_->homingRequired(out_srv_res_.path);
+  const bool required = rrg_->homingRequired(out_srv_res_.path);
+  out_srv_res_.status = required ? planner_msgs::planner_srv::Response::kHoming
+                               : planner_msgs::planner_srv::Response::kAutoCustomPath;
+  // A false condition must not return a homing path/status while a later
+  // stateful tree action waits; PCI would stop automatic planning on that status.
+  if (!required) out_srv_res_.path.clear();
+  return required;
 }
 
 bool Gbplanner::getHomingPath()
@@ -1248,6 +1388,7 @@ void Gbplanner::processPose(const geometry_msgs::Pose& pose) {
   state[3] = tf::getYaw(pose.orientation);
   rrg_->setState(state);
   current_state_ = state;
+  waypoint_odometry_received_ = true;
 }
 
 void Gbplanner::odometryCallback(const nav_msgs::Odometry& odo) {
@@ -1258,6 +1399,7 @@ void Gbplanner::odometryCallback(const nav_msgs::Odometry& odo) {
   state[3] = tf::getYaw(odo.pose.pose.orientation);
   rrg_->setState(state);
   current_state_ = state;
+  waypoint_odometry_received_ = true;
 }
 
 void Gbplanner::robotStatusCallback(const planner_msgs::RobotStatus& status) {

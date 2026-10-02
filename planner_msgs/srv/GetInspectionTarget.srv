@@ -1,0 +1,15 @@
+int32 compartment_index
+int32 completed_target_index
+string completed_revision
+bool has_entry_wall
+geometry_msgs/Pose entry_wall
+bool has_exit_wall
+geometry_msgs/Pose exit_wall
+geometry_msgs/Vector3 forward
+---
+bool ready
+bool has_target
+int32 target_index
+geometry_msgs/PoseStamped target
+string revision
+string message
