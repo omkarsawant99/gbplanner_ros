@@ -30,6 +30,7 @@ cs_add_executable(gbplanner_node src/gbplanner_ros_node.cpp)
 target_link_libraries(gbplanner_node ${PROJECT_NAME} ${planner_common_LIBRARIES})
 
 catkin_install_python(PROGRAMS
+  scripts/mock_ndt_measurement.py
   scripts/configure_compartments_from_map.py
   scripts/inspection_target_compartments.py
   scripts/compartments.py

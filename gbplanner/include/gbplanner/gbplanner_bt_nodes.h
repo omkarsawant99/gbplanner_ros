@@ -9,6 +9,7 @@
 
 #include "gbplanner/gbplanner.h"
 #include "planner_msgs/GetInspectionTarget.h"
+#include <std_srvs/Trigger.h>
 
 /*
 Returns:
@@ -606,7 +607,7 @@ private:
 };
 
 // The planner chooses the next bridge target; this node gives its path to PCI and only
-// acknowledges the target after the vehicle has reached its position.
+// acknowledges the target after arrival and the configured dwell/measurement handshake.
 class InspectionWaypoint : public BT::StatefulActionNode
 {
 public:
@@ -620,15 +621,33 @@ public:
     ros::NodeHandle private_nh("~");
     private_nh.param("inspection_waypoint_reach_radius_m", reach_radius_m_, 0.15);
     private_nh.param("inspection_waypoint_hold_s", reach_hold_s_, 1.0);
+    private_nh.param("ndt_measurement_enabled", measurement_enabled_, false);
+    std::string start_service, complete_service;
+    private_nh.param<std::string>("ndt_start_service", start_service, "/ndt/start_measurement");
+    private_nh.param<std::string>("ndt_complete_service", complete_service, "/ndt/measurement_complete");
+    if (measurement_enabled_) {
+      measurement_client_ = nh.serviceClient<std_srvs::Trigger>(start_service);
+      measurement_server_ = nh.advertiseService(complete_service, &InspectionWaypoint::measurementComplete, this);
+    }
     if (!std::isfinite(reach_radius_m_) || reach_radius_m_ <= 0.0) reach_radius_m_ = 0.15;
     if (!std::isfinite(reach_hold_s_) || reach_hold_s_ < 0.0) reach_hold_s_ = 1.0;
   }
   static BT::PortsList providedPorts() { return {}; }
   BT::NodeStatus onStart() override { return step(); }
   BT::NodeStatus onRunning() override { return step(); }
-  void onHalted() override { reached_since_ = ros::Time(); }
+  void onHalted() override { reached_since_ = ros::Time(); resetMeasurement(); }
 private:
   BT::NodeStatus step();
+  bool measurementComplete(std_srvs::Trigger::Request& req,
+                           std_srvs::Trigger::Response& res);
+  void resetMeasurement();
+  bool measurement_enabled_ = false;
+  bool measurement_started_ = false;
+  bool measurement_done_ = false;
+  bool measurement_requested_ = false;
+  ros::WallTime next_measurement_retry_;
+  ros::ServiceClient measurement_client_;
+  ros::ServiceServer measurement_server_;
   std::shared_ptr<Gbplanner> gbplanner_;
   ros::ServiceClient target_client_;
   int compartment_index_ = -1;

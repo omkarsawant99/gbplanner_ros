@@ -245,16 +245,17 @@ walls make the tree wait. Wall normals are oriented along mission progress, so t
 walls and reversed detector normals are handled. Within 5 cm of a wall, target viewing
 direction resolves which side should inspect it. Targets in other compartments are
 deferred and completed targets are remembered across traversals.
-Inspection arrival requires remaining within `inspection_waypoint_reach_radius_m`
-(default 0.15 m) for `inspection_waypoint_hold_s` (default 3.0 s of ROS time in
-`gbplanner_cgn.launch`). After the hold, the planner selects the next pending target
-in the compartment. Once none remain, it traverses the next manhole and repeats
-the target check in the next compartment.
+In the default CGN waypoint workflow, arrival within
+`inspection_waypoint_reach_radius_m` (0.15 m) starts the NDT measurement handshake
+described below. Only successful measurement completion marks the target done.
+It then selects another target in the compartment, or traverses the next manhole
+if none remain. With `ndt_measurement_enabled:=false`, the legacy
+`inspection_waypoint_hold_s` dwell (3 seconds) completes the target instead.
 With `waypoint_reach_bwt.xml`, PCI's path completion radius is half the inspection
 arrival radius (0.075 m by default). This lets the controller finish short trajectories
 before PCI requests another path; the previous 0.7 m tolerance could cause repeated
 commands to restart the trajectory before its final waypoint was applied.
-Leaving that radius resets the dwell. The planner first tries the requested position,
+In legacy dwell mode, leaving that radius resets the dwell. The planner first tries the requested position,
 then searches nearest-first on a 3D lattice for a reachable free pose in the same
 compartment. `inspection_waypoint_search_radius_m` defaults to 1.0 m and
 `inspection_waypoint_search_resolution_m` to 0.1 m. Up to
@@ -272,6 +273,72 @@ For the `InspectionWaypoint` action, yaw follows the shortest turn from the
 starting heading to the target heading, interpolated by distance along the route.
 Intermediate graph viewing angles are ignored. This is confined to target travel
 in the waypoint tree; ordinary inspection and manhole traversal retain their yaw behavior.
+### NDT measurement handshake (waypoint tree)
+
+The `InspectionWaypoint` action uses standard ROS services:
+
+| Service | Type | Direction |
+| --- | --- | --- |
+| `/ndt/start_measurement` | `std_srvs/Trigger` | Planner → measurement node |
+| `/ndt/measurement_complete` | `std_srvs/Trigger` | Measurement node → planner |
+
+Both requests are empty; responses contain `bool success` and `string message`.
+The NDT node advertises the start service and returns promptly with `success: true`
+to accept the measurement. It performs its work asynchronously and then calls the
+completion service with an empty request. Calling completion signifies successful
+measurement; there is no failure field in the request. If measurement fails, do
+not call completion. The planner will continue holding until operator intervention
+or a later successful completion.
+
+While waiting, the existing controller retains its endpoint setpoint. The planner
+does not mark the target done or issue another navigation path after acceptance.
+Completion returns `success: false` if no measurement is active.
+
+This is a single-active-measurement interface: requests carry no target ID, plan
+revision, pose, or cancellation token. Duplicate starts while measuring should
+return success without restarting work. A delayed/duplicate completion arriving
+during a later measurement cannot be distinguished from that measurement's real
+completion. The external node must serialize measurements and clear pending work
+when restarting/changing a mission. The planner supplies no flight-controller
+ownership handover; command arbitration/cancellation must be implemented before
+the external NDT controller commands the vehicle.
+
+The default CGN launch enables `ndt_mock_en:=true`. The mock performs no NDT and
+publishes no control commands; it calls completion after **10 seconds of ROS time**
+(configurable with `ndt_mock_duration_s`). It pauses with the simulation clock.
+This replaces the old 3-second dwell in measurement mode, rather than adding to it.
+
+```bash
+# Default: navigate → mock measurement (10 s) → next target / manhole
+roslaunch gbplanner gbplanner_cgn.launch
+
+# Use an external measurement service; no automatic timer in the planner
+roslaunch gbplanner gbplanner_cgn.launch ndt_mock_en:=false
+
+# Restore the previous arrival-and-dwell workflow
+roslaunch gbplanner gbplanner_cgn.launch ndt_measurement_enabled:=false
+```
+
+For a manual completion test with the mock disabled, an NDT service server must
+first accept the planner's start call. Then run:
+
+```bash
+rosservice call /ndt/measurement_complete "{}"
+```
+
+The NDT server subscribes to no service topic: it advertises the start endpoint,
+for example `rospy.Service('/ndt/start_measurement', Trigger, on_start)`, where the
+callback returns `TriggerResponse(success=True, message='Accepted')`. After the
+measurement worker finishes, it calls
+`rospy.ServiceProxy('/ndt/measurement_complete', Trigger)()`.
+
+Service names can be overridden with `ndt_start_service` and `ndt_complete_service`.
+The bridge and the ordinary inspection/manhole actions do not implement this protocol.
+For the eventual controller, a ROS action would also be appropriate if feedback and
+cancellation are needed; these two services provide the requested start/completion
+interface for now. Stopping PCI pauses planner ticks but does not cancel an external
+measurement; full external-controller handover is not implemented by this mock.
+
 The selected goal appears in orange as **Reachable Inspection Waypoint** on
 `/gbplanner/inspection_waypoint`; the bridge's original targets remain cyan. Arrival
 and the dwell use that selected goal, while completion refers to the original target

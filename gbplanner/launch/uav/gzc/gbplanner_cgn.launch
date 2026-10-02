@@ -23,6 +23,12 @@
 	<arg name="inspection_hover_s" default="3.0" />
 	<arg name="inspection_waypoint_reach_radius_m" default="0.15" />
 	<arg name="inspection_waypoint_hold_s" default="3.0" />
+	<!-- Measurement handshake applies only to InspectionWaypoint, not inspection/manhole paths. -->
+	<arg name="ndt_measurement_enabled" default="true" />
+	<arg name="ndt_mock_en" default="true" />
+	<arg name="ndt_mock_duration_s" default="10.0" />
+	<arg name="ndt_start_service" default="/ndt/start_measurement" />
+	<arg name="ndt_complete_service" default="/ndt/measurement_complete" />
 	<arg name="inspection_waypoint_search_radius_m" default="1.0" />
 	<arg name="inspection_waypoint_search_resolution_m" default="0.1" />
 	<arg name="inspection_waypoint_search_attempts" default="8" />
@@ -39,6 +45,7 @@
 	<arg name="map_config_file" default="$(arg voxblox_config_file)"/>
 	<arg name="opening_config_file" default="$(find manhole_detector)/config/manhole_detector.yaml"/>
 	<arg name="planner_behaviour_tree" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/waypoint_reach_bwt.xml"/>
+	<!-- <arg name="planner_behaviour_tree" default="$(find gbplanner)/config/uav/gzc/cgn_elios3/main_tree_integration.xml"/> -->
 
 	<arg name="odometry_topic" default="/rmf_obelix/ground_truth/odometry_throttled"/>
 	<arg name="autoassess_plan_name" default="Test plan for gbplannersim"/>
@@ -50,6 +57,7 @@
 		<arg name="inspection_target_waypoints_en" value="$(arg inspection_target_waypoints_en)"/>
 		<arg name="inspection_target_auto_start" value="$(arg inspection_target_auto_start)"/>
 	</include>
+
 	<!-- Override after the bridge loads its YAML; upstream has no launch argument for this. -->
 	<param if="$(arg autoassess_bridge_en)" name="/autoassess_bridge/set_global_bound"
 	       type="bool" value="$(arg autoassess_set_global_bound)"/>
@@ -57,7 +65,6 @@
 	      type="inspection_target_compartments.py" name="inspection_target_compartments" output="screen">
 		<param name="world_frame" value="$(arg world_frame)"/>
 	</node>
-
 
 	<!-- Simulation -->
 	<include file="$(find arl_gazebo_sim)/gzc/uav_sim/launch/uav_gzc_bwt_inspection.launch">
@@ -82,9 +89,19 @@
 		<param name="opening_forward_only" value="true"/>
 		<param name="inspection_waypoint_reach_radius_m" value="$(arg inspection_waypoint_reach_radius_m)"/>
 		<param name="inspection_waypoint_hold_s" value="$(arg inspection_waypoint_hold_s)"/>
+		<param name="ndt_measurement_enabled" value="$(arg ndt_measurement_enabled)"/>
+		<param name="ndt_start_service" value="$(arg ndt_start_service)"/>
+		<param name="ndt_complete_service" value="$(arg ndt_complete_service)"/>
 		<param name="inspection_waypoint_search_radius_m" value="$(arg inspection_waypoint_search_radius_m)"/>
 		<param name="inspection_waypoint_search_resolution_m" value="$(arg inspection_waypoint_search_resolution_m)"/>
 		<param name="inspection_waypoint_search_attempts" value="$(arg inspection_waypoint_search_attempts)"/>
+	</node>
+
+	<node if="$(eval arg('ndt_measurement_enabled') and arg('ndt_mock_en') and arg('planner_behaviour_tree').endswith('waypoint_reach_bwt.xml'))"
+	      pkg="gbplanner" type="mock_ndt_measurement.py" name="mock_ndt_measurement" output="screen">
+		<param name="duration_s" value="$(arg ndt_mock_duration_s)"/>
+		<param name="start_service" value="$(arg ndt_start_service)"/>
+		<param name="complete_service" value="$(arg ndt_complete_service)"/>
 	</node>
 
 	<!-- Planner and Control Interface -->

@@ -603,6 +603,28 @@ BT::NodeStatus BeginWaypointCompartment::tick()
                                                  : BT::NodeStatus::FAILURE;
 }
 
+void InspectionWaypoint::resetMeasurement()
+{
+  measurement_requested_ = false;
+  measurement_started_ = false;
+  measurement_done_ = false;
+  next_measurement_retry_ = ros::WallTime();
+}
+
+bool InspectionWaypoint::measurementComplete(
+    std_srvs::Trigger::Request& req, std_srvs::Trigger::Response& res)
+{
+  res.success = measurement_started_;
+  if (!res.success) {
+    res.message = "No active NDT measurement";
+    return true;
+  }
+  measurement_done_ = true;
+  res.message = "Completion recorded; navigation may continue on the next planner tick";
+  ROS_INFO("NDT measurement completed for target %d", target_index_);
+  return true;
+}
+
 BT::NodeStatus InspectionWaypoint::step()
 {
   gbplanner_->out_srv_res_.path.clear();
@@ -613,6 +635,7 @@ BT::NodeStatus InspectionWaypoint::step()
     return BT::NodeStatus::RUNNING;
   }
   if (compartment != compartment_index_) {
+    resetMeasurement();
     compartment_index_ = compartment;
     target_index_ = -1;
     target_resolved_ = false;
@@ -626,8 +649,8 @@ BT::NodeStatus InspectionWaypoint::step()
   const ros::Time now = ros::Time::now();
   if (!within_target) reached_since_ = ros::Time();
   else if (reached_since_.isZero() || now < reached_since_) reached_since_ = now;
-  const bool reached = within_target &&
-      (now - reached_since_).toSec() >= reach_hold_s_;
+  const bool reached = measurement_enabled_ ? measurement_done_ :
+      (within_target && (now - reached_since_).toSec() >= reach_hold_s_);
   planner_msgs::GetInspectionTarget service;
   bool has_entry_wall = false, has_exit_wall = false;
   if (!gbplanner_->waypointCompartmentWalls(
@@ -651,6 +674,7 @@ BT::NodeStatus InspectionWaypoint::step()
     return BT::NodeStatus::RUNNING;
   }
   if (target_index_ >= 0 && revision_ != result.revision) {
+    resetMeasurement();
     ROS_WARN("AutoAssess target plan changed; discarding previous waypoint");
     target_index_ = -1;
     target_resolved_ = false;
@@ -658,17 +682,20 @@ BT::NodeStatus InspectionWaypoint::step()
     reached_since_ = ros::Time();
   }
   if (reached && result.revision == revision_) {
-    ROS_INFO("Inspection target %d reached: within %.2f m for %.1f s",
-             target_index_, reach_radius_m_, reach_hold_s_);
+    ROS_INFO("Inspection target %d complete (%s)", target_index_,
+             measurement_enabled_ ? "NDT completion received" : "arrival hold finished");
+    resetMeasurement();
     target_index_ = -1;
     target_resolved_ = false;
     reached_since_ = ros::Time();
   }
   if (!result.has_target) {
+    resetMeasurement();
     ROS_INFO("No remaining AutoAssess targets in compartment %d", compartment);
     return BT::NodeStatus::FAILURE;
   }
   if (target_index_ != result.target_index) {
+    resetMeasurement();
     target_index_ = result.target_index;
     requested_target_ = result.target;
     target_ = result.target;
@@ -679,7 +706,27 @@ BT::NodeStatus InspectionWaypoint::step()
     ROS_INFO("Planning to AutoAssess target %d in compartment %d",
              target_index_, compartment);
   }
-  if (target_resolved_ && gbplanner_->waypointTargetReached(target_, reach_radius_m_)) {
+  if (measurement_enabled_ && measurement_started_) {
+    // The position controller retains its endpoint command. Never send another
+    // navigation path while measurement owns this workflow stage.
+    return BT::NodeStatus::RUNNING;
+  }
+  if (target_resolved_ && (gbplanner_->waypointTargetReached(target_, reach_radius_m_) ||
+                          (measurement_enabled_ && measurement_requested_))) {
+    if (measurement_enabled_) {
+      if (ros::WallTime::now() < next_measurement_retry_) return BT::NodeStatus::RUNNING;
+      measurement_requested_ = true;
+      std_srvs::Trigger request;
+      next_measurement_retry_ = ros::WallTime::now() + ros::WallDuration(2.0);
+      if (!measurement_client_.exists() || !measurement_client_.call(request) ||
+          !request.response.success) {
+        ROS_WARN_THROTTLE(5.0, "Waiting for NDT start acceptance; holding target %d", target_index_);
+        return BT::NodeStatus::RUNNING;
+      }
+      measurement_started_ = true;
+      ROS_INFO("NDT measurement started for target %d; holding until completion", target_index_);
+      return BT::NodeStatus::RUNNING;
+    }
     // Keep the controller's endpoint setpoint while the arrival dwell elapses.
     return BT::NodeStatus::RUNNING;
   }
