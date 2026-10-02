@@ -47,10 +47,12 @@
 	<include if="$(arg autoassess_bridge_en)" file="$(find autoassess_bridge)/launch/autoassess_bridge.launch">
 		<arg name="odometry_topic" value="$(arg odometry_topic)"/>
 		<arg name="plan_name" value="$(arg autoassess_plan_name)"/>
-		<arg name="set_global_bound" value="$(arg autoassess_set_global_bound)"/>
 		<arg name="inspection_target_waypoints_en" value="$(arg inspection_target_waypoints_en)"/>
 		<arg name="inspection_target_auto_start" value="$(arg inspection_target_auto_start)"/>
 	</include>
+	<!-- Override after the bridge loads its YAML; upstream has no launch argument for this. -->
+	<param if="$(arg autoassess_bridge_en)" name="/autoassess_bridge/set_global_bound"
+	       type="bool" value="$(arg autoassess_set_global_bound)"/>
 	<node if="$(arg autoassess_bridge_en)" pkg="gbplanner"
 	      type="inspection_target_compartments.py" name="inspection_target_compartments" output="screen">
 		<param name="world_frame" value="$(arg world_frame)"/>

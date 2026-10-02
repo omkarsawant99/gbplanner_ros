@@ -165,6 +165,70 @@ positioned, automatic planning can be started directly with:
 rosservice call /planner_control_interface/std_srvs/automatic_planning
 ```
 
+### Generate compartment configuration from a downloaded map
+
+Run `gbplanner/scripts/configure_compartments_from_map.py` after the bridge has
+downloaded a new PCD. The script estimates transverse wall planes, orders a row
+of compartments, and calculates:
+
+- `PlanningParams.compartment_centers` (XYZ in the map frame).
+- `PlanningParams.compartment_dimensions` (one shared, axis-aligned sampling box).
+- `BoundedSpaceParams.Global` (enclosing all generated compartment boxes).
+
+From this repository directory, preview the current reference map:
+
+```bash
+python3 gbplanner/scripts/configure_compartments_from_map.py \
+  --map ~/.ros/autoassess_maps/7810494868369385/mesh_984.pcd \
+  --config gbplanner/config/uav/gzc/cgn_elios3/gbplanner_config_elios3.yaml \
+  --roi -2 -2.8 -0.5 12.2 3 3.3 \
+  --expected-compartments 5 \
+  --report-prefix /tmp/compartment_map
+```
+
+Add **`--apply`** to that command to automatically update the config after
+inference succeeds. It first saves an exact timestamped `.bak.*` copy and then
+atomically replaces the YAML. Other parameter values are preserved, but YAML
+comments and formatting are rewritten. Alternatively use
+`--output /tmp/generated_planner.yaml` to create a separate complete config.
+Neither option changes the running planner. Restart it to load the file:
+
+```bash
+roslaunch gbplanner gbplanner_cgn.launch autoassess_set_global_bound:=false
+# For a separate generated config, also pass:
+# gbplanner_config_file:=/tmp/generated_planner.yaml
+```
+
+The bridge bound override must be disabled when using the generated bounds.
+The script writes a JSON report and a PNG top-down preview (the rectangles show
+estimated room extents; the shared sampling box also includes `--margin`).
+No C++ rebuild is needed to run the script directly. Its dependencies are
+`python3-numpy`, `python3-scipy`, `python3-yaml`, and `python3-matplotlib`.
+After rebuilding the package it is also available through
+`rosrun gbplanner configure_compartments_from_map.py`.
+
+For a **new map**, replace `--map` and select the tank region with
+`--roi XMIN YMIN ZMIN XMAX YMAX ZMAX`. Use `--whole-map` only if it contains just
+the tank of interest. This script assumes a straight row of compartments with
+roughly parallel walls, including both end walls. It supports ASCII and
+uncompressed binary PCD; if normals are absent, they are estimated locally.
+The PCD must already use the planner's world coordinates; no TF conversion or
+map registration is performed.
+
+`--axis-yaw-deg` gives the approximate forward direction (default +X; use 180
+to reverse the ordering). `--min-width` and `--max-width` constrain room spacing
+(defaults 1.5–3.5 m); change these for different tanks. Expected room count is
+optional but useful as a validation constraint. The first center is estimated
+from the first room, rather than forced to the drone's starting position.
+
+Wall selection is a spacing heuristic: baffles, missing walls, branched rooms,
+and incomplete scans can produce incorrect estimates. The report includes all
+wall candidates and the selected sequence; inspect the preview on a new map.
+For a reviewed layout, `--wall-offsets` can supply the boundary-plane offsets
+along the fitted axis, including both end walls. These offsets are not generally
+world X coordinates. Geometry bounds do not change collision voxels or robot
+clearance settings, and wall inference does not prove that manholes are traversable.
+
 The planner classifies each target between the detected entry and exit wall planes.
 CGN uses map-aligned compartment centers at x = 0, 3.04, 5.42, 7.83, 10.44 m,
 y = 0 m and z = 1.5 m. Relative compartment bounds are `[-2, -1, -1.5]`

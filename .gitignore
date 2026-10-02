@@ -53,3 +53,6 @@ CATKIN_IGNORE
 .vscode/
 
 ctxt.md
+
+# PNG images
+*.png
